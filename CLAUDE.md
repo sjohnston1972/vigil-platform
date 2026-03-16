@@ -144,6 +144,7 @@ If you are writing code that touches data and there is no `tenant_id` filter —
 - `conversations` — partitioned by `tenant_id`, keyed by `session_id`
 - `audit_logs` — partitioned by `tenant_id`, keyed by timestamp
 - `tenant_config` — partitioned by `tenant_id`, one document per tenant
+- `change_records` — partitioned by `tenant_id`, keyed by `change_id` — full lifecycle of every proposed network change
 
 ### Always use partition key
 
@@ -525,6 +526,82 @@ pytest tests/
 
 ---
 
+## Network Agent Write Operations Pattern
+
+### Two-phase change flow
+
+Phase 1 (propose) and Phase 2 (apply) are separate requests. Nothing touches the device in Phase 1.
+
+```python
+# Phase 1: propose_change — generates diff, writes change record, no device changes
+# Phase 2: apply_change — validates approved status, applies, verifies
+
+# ALWAYS fetch change_commands from the stored change record at apply time
+# NEVER execute commands from the tool call input at apply time
+record = container.read_item(item=change_id, partition_key=tenant_id)
+if record["status"] != "approved":
+    raise ValueError("invalid_change_status")
+change_commands = record["change_commands"]  # from DB, not from tool input
+```
+
+### change_records Cosmos DB lookups — always use partition key
+
+```python
+# CORRECT — tenant-scoped lookup
+record = container.read_item(item=change_id, partition_key=tenant_id)
+if record["tenant_id"] != tenant_id:
+    raise ValueError("unauthorized")
+
+# WRONG — cross-partition query violates multi-tenancy
+container.query_items(query="SELECT * FROM c WHERE c.id = @id")
+```
+
+### Change record state machine
+
+```
+pending → reviewed → approved → applying → applied
+                              ↘ rejected  ↓          ↘ failed → rolled_back
+                                          ↓
+                                    drift_pending → approved → applying → ...
+                                          ↘ failed (user cancelled)
+```
+
+- `apply_change` only proceeds if `status == "approved"` — `drift_pending` is rejected
+- `rollback_change` only proceeds if `status == "applied"` or `"failed"`
+- Pre-change config is written to the record **before** any commands are sent to the device
+
+### Change Reviewer Agent — data handling
+
+```python
+# current_config and proposed_change are NEVER logged or stored
+# Used only for the Claude review call, then discarded
+logger.info("Review requested", extra={
+    "tenant_id": request.tenant_id,
+    "change_id": request.change_id,
+    "device_type": request.device_type,
+    # DO NOT log current_config or proposed_change
+})
+```
+
+### Stuck `applying` recovery
+
+The Network Agent runs a background task that checks for change records stuck in `applying` status using the `applying_started_at` Cosmos DB timestamp (not in-memory state — must survive container restarts):
+
+```python
+# On startup and periodically
+stuck = container.query_items(
+    query="SELECT * FROM c WHERE c.status = 'applying' AND c.applying_started_at < @cutoff",
+    parameters=[{"name": "@cutoff", "value": cutoff_iso}],
+    partition_key=tenant_id  # per-tenant scan
+)
+for record in stuck:
+    record["status"] = "failed"
+    record["failure_reason"] = "apply_timeout"
+    container.replace_item(item=record["id"], body=record, partition_key=tenant_id)
+```
+
+---
+
 ## What Claude Code Must Never Do
 
 - Hardcode credentials, API keys, or connection strings anywhere
@@ -538,6 +615,11 @@ pytest tests/
 - Leave `ARCHITECTURE.md` or `CLAUDE.md` out of date after changing the system
 - Hardcode values in Terraform — use variables
 - Use `EventSource` for SSE — it is GET-only and cannot send a request body; always use `fetch` + `ReadableStream`
+- Execute `change_commands` from the tool call input at apply time — always fetch from the stored `change_records` document
+- Query `change_records` without `tenant_id` as partition key — always use `(change_id, tenant_id)`
+- Log or store `current_config` or `proposed_change` in the Change Reviewer Agent — these are used only during the Claude review call
+- Proceed with `apply_change` if `status != "approved"` — `drift_pending`, `pending`, and all other statuses must be rejected
+- Emit `done` before writing the Cosmos DB audit/conversation record — write ordering guarantees audit integrity
 - Use `asyncio.gather()` for parallel agent calls — use `asyncio.as_completed()` so `agent_complete` events emit in real time as each agent finishes, not batched after the slowest
 - Emit `done` before writing to Cosmos DB — the write must complete first to guarantee audit integrity
 - Buffer the SSE stream in the Gateway — use `httpx.AsyncClient` with `aiter_bytes()` and `StreamingResponse`

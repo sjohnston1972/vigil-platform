@@ -131,6 +131,10 @@ If a specialist agent fails, the coordinator returns partial results with a clea
 - **Endpoints:**
   - `POST /chat/stream` — primary, returns `text/event-stream`
   - `POST /chat` — non-streaming fallback
+  - `POST /changes/{change_id}/apply` — phase 2 approval
+  - `POST /changes/{change_id}/reject` — reject proposed change
+  - `POST /changes/{change_id}/acknowledge-drift` — acknowledge config drift and resume apply
+  - `POST /changes/{change_id}/abort` — abort in-flight change
 - **Model:** Claude Sonnet 4.6 via Azure AI Foundry
 - **Tool definitions:** One tool registered per specialist agent
 
@@ -140,9 +144,13 @@ If a specialist agent fails, the coordinator returns partial results with a clea
 - **Responsibilities:**
   - Authenticate to network devices via ISE TACACS+ — no direct credential storage
   - Connect to network devices via SSH using Netmiko
-  - Pull running configurations, interface status, routing tables, ACLs
-  - Parse and structure device output for downstream agents
+  - **Read operations:** Pull running configurations, interface status, routing tables, ACLs
+  - **Write operations:** Propose config/state changes (diff only, nothing applied), apply approved changes, rollback to pre-change config
+  - All write operations require `write_enabled: true` in tenant config
+  - Pre-change config captured to Cosmos DB before any commands sent — enables safe rollback
+  - Background task recovers change records stuck in `applying` state using `applying_started_at` timestamp
   - ISE enforces which devices the agent can access and which commands it can run
+- **TACACS+ profiles:** Read profile (`show *` only) and Write profile (explicit permit list + catch-all deny) — write profile per-tenant
 - **Supported platforms:** Cisco IOS, IOS-XE, NX-OS, ASA, Palo Alto PAN-OS
 - **Never called directly by users** — coordinator only
 
@@ -154,6 +162,18 @@ If a specialist agent fails, the coordinator returns partial results with a clea
   - Return grounded answers with source references
   - Used for compliance checks, best practice lookups, policy validation
 - **Knowledge base:** Public domain network and security documentation indexed in Azure AI Search
+- **Never called directly by users** — coordinator only
+
+### Change Reviewer Agent
+- **Type:** Containerised (FastAPI + Claude Sonnet 4.6)
+- **Service:** `services/agent-change-reviewer`
+- **Responsibilities:**
+  - Receive a proposed network change, device type, and current running config
+  - Perform AI peer review assessing correctness, risk/blast radius, and alternatives
+  - Return a structured recommendation: `approve`, `flag`, or `reject`
+  - Update the `change_records` Cosmos DB document with the review result
+  - Never logs or stores `current_config` or `proposed_change` — used only during the Claude review call
+- **Always called after `propose_change`** and before the change is presented to the user
 - **Never called directly by users** — coordinator only
 
 ### ITSM Agent
@@ -234,6 +254,38 @@ Coordinator → Network Agent
               Network device (SSH via Netmiko)
                   ↓
               ISE logs all command authorisations
+```
+
+### Network change workflow (two-phase)
+
+```
+User: "Shut down interface Gi0/1 on 10.0.0.1 — it's showing errors"
+
+Phase 1 — Propose and Review (no device changes):
+  Coordinator → Network Agent (propose_change)
+    → connects to device (read profile), captures config, generates diff
+    → writes change_records document (status: pending)
+    SSE: change_proposed (change_id, diff)
+
+  Coordinator → Change Reviewer Agent
+    → Claude peer review: correctness, risk, alternatives
+    → updates change_records (status: reviewed)
+    SSE: change_reviewed (recommendation: flag, risk: "hosts lose connectivity")
+
+  User sees approval modal with diff + peer review
+  User clicks "Approve & Apply"
+
+Phase 2 — Apply (after explicit approval):
+  Coordinator sets change_records status → approved, approved_by from SAML claims
+  Coordinator → Network Agent (apply_change)
+    → validates status == approved, not expired
+    → checks for config drift → if found: SSE: change_drift_detected, status → drift_pending
+    → pushes change_commands to device (write profile)
+    → verifies applied
+    → updates change_records (status: applied)
+    SSE: change_applied (jira_ticket: VIGIL-124)
+
+  Coordinator → ITSM Agent → raises Jira change ticket
 ```
 
 ### Multi-agent audit workflow (parallel execution)
@@ -381,7 +433,9 @@ Each tenant in VIGIL is isolated at every layer:
 | Gateway | Tenant ID extracted from SAML token claims, tagged on all downstream calls |
 | Conversation history | Cosmos DB partitioned by tenant ID |
 | Audit logs | Cosmos DB partitioned by tenant ID |
+| Change records | Cosmos DB partitioned by tenant ID — change_id lookups always use (change_id, tenant_id) |
 | Token budgets | Per-tenant daily/monthly limits enforced at Gateway |
+| Write capability | `write_enabled` flag per tenant in tenant_config — controls Network Agent write profile activation |
 | RAG knowledge base | Azure AI Search index filtered by tenant ID |
 | Cost tracking | Azure tags per tenant for cost allocation |
 
@@ -528,17 +582,20 @@ ISE_SAML_AUDIENCE       # Expected audience in SAML token
 ```
 ISE_TACACS_HOST         # ISE TACACS+ server IP
 ISE_TACACS_KEY          # TACACS+ shared secret (fetched from Key Vault)
+COSMOS_ENDPOINT         # Azure Cosmos DB endpoint (for change_records reads/writes)
+COSMOS_DATABASE         # Database name
 ```
 
 **Coordinator**
 ```
-AZURE_FOUNDRY_ENDPOINT  # Azure AI Foundry endpoint
-AZURE_FOUNDRY_MODEL     # Model deployment name (claude-sonnet-4-6)
-NETWORK_AGENT_URL       # Internal URL of Network Agent
-RAG_AGENT_URL           # Internal URL of RAG Agent
-ITSM_AGENT_URL          # Internal URL of ITSM Agent
-ENRICHMENT_AGENT_URL    # Internal URL of Enrichment Agent
-COSMOS_ENDPOINT         # Azure Cosmos DB endpoint
+AZURE_FOUNDRY_ENDPOINT       # Azure AI Foundry endpoint
+AZURE_FOUNDRY_MODEL          # Model deployment name (claude-sonnet-4-6)
+NETWORK_AGENT_URL            # Internal URL of Network Agent
+RAG_AGENT_URL                # Internal URL of RAG Agent
+ITSM_AGENT_URL               # Internal URL of ITSM Agent
+ENRICHMENT_AGENT_URL         # Internal URL of Enrichment Agent
+CHANGE_REVIEWER_AGENT_URL    # Internal URL of Change Reviewer Agent
+COSMOS_ENDPOINT              # Azure Cosmos DB endpoint
 ```
 
 **All agents use Azure Managed Identity** — no API keys required for Azure services.

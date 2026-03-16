@@ -15,9 +15,10 @@ VIGIL exposes a conversational chat interface backed by a central coordinator ag
 | Capability | Description |
 |---|---|
 | Network auditing | SSH into Cisco/Palo Alto devices via ISE TACACS+, retrieve config, interfaces, routes, ACLs |
+| Network changes | Propose, AI peer review, human approve, apply, and rollback config/state changes — two-phase with full audit trail |
 | Vulnerability enrichment | NVD CVE lookup, Cisco EoX lifecycle status, optional Shodan exposure check |
 | RAG knowledge base | Azure AI Search over compliance docs, best practices, and policy documents |
-| ITSM integration | Create and query Jira tickets from audit findings |
+| ITSM integration | Create and query Jira tickets from audit findings and every applied network change |
 | Real-time streaming | SSE streams agent progress and Claude's response token by token |
 | Multi-tenancy | Complete tenant isolation at every layer — auth, data, device access, token budgets |
 
@@ -87,11 +88,12 @@ graph TB
 | React UI | Container (Vite) | Chat interface, admin dashboard, audit log viewer |
 | Agent Gateway | Container (FastAPI) | Token validation, rate limiting, token budgets, SSE proxy |
 | Coordinator Agent | Container (FastAPI + Claude Sonnet 4.6) | Multi-agent orchestration, parallel execution, SSE streaming |
-| Network Agent | Container (FastAPI + Netmiko) | SSH device interrogation via ISE TACACS+ |
+| Network Agent | Container (FastAPI + Netmiko) | SSH device interrogation and config/state changes via ISE TACACS+ |
+| Change Reviewer Agent | Container (FastAPI + Claude Sonnet 4.6) | AI peer review of proposed network changes — correctness, risk, alternatives |
 | RAG Agent | Container (FastAPI) | Azure AI Search knowledge base queries |
 | ITSM Agent | Container (FastAPI) | Jira ticket creation and querying |
 | Enrichment Agent | Container (FastAPI) | CVE, EoX lifecycle, Shodan lookups |
-| Cosmos DB | Azure Native | Conversations, audit logs, tenant config — partitioned by `tenant_id` |
+| Cosmos DB | Azure Native | Conversations, audit logs, tenant config, change records — partitioned by `tenant_id` |
 | Azure AI Search | Azure Native | RAG knowledge base with tenant-filtered queries |
 | Azure Key Vault | Azure Native | Secrets — fetched at startup via Managed Identity |
 | Azure AI Foundry | Azure Native | Claude Sonnet 4.6 model hosting |
