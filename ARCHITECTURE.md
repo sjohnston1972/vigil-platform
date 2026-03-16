@@ -107,11 +107,13 @@ If a specialist agent fails, the coordinator returns partial results with a clea
   - Validate ISE-issued SAML tokens / JWT on every request
   - Identify and tag requests with tenant ID (extracted from token claims)
   - Enforce per-tenant rate limits (requests per minute)
-  - Enforce per-tenant token budgets (daily/monthly)
-  - Route validated requests to the Coordinator Agent
+  - Enforce per-tenant token budgets (daily/monthly) — pre-flight check before proxying
+  - Proxy SSE streams from the Coordinator to the UI — non-buffered, using `httpx.AsyncClient` with `aiter_bytes()`
+  - Scan the `done` event in the proxied stream to capture `tokens_used` for budget deduction
   - Write audit log entries to Cosmos DB
   - Return structured errors for rate limit, auth, and budget violations
 - **Does not:** Execute agent logic, call LLMs, or access network devices
+- **SSE proxy pattern:** Returns `StreamingResponse` wrapping an async generator over the `httpx` byte iterator — never buffers the full response
 
 ### Coordinator Agent
 - **Type:** Containerised (FastAPI + Claude Sonnet 4.6)
@@ -119,11 +121,16 @@ If a specialist agent fails, the coordinator returns partial results with a clea
 - **Responsibilities:**
   - Receive validated requests from the Gateway
   - Load conversation history from Cosmos DB using session ID
+  - Load tenant config from Cosmos DB — `max_tokens` limits applied to every Claude call
   - Determine which specialist agents to invoke and in what order
   - Execute multi-step agent workflows via tool calls
-  - Handle specialist agent failures gracefully
-  - Assemble consolidated responses
-  - Write updated conversation history to Cosmos DB
+  - **Parallel execution:** When Claude returns multiple tool calls in a single response, fan them out concurrently with `asyncio.as_completed()` — each agent completion emits an SSE event immediately as it finishes
+  - Handle specialist agent failures gracefully — emit `agent_error` and continue with partial results
+  - Stream the final response token by token via SSE
+  - Write updated conversation and audit log to Cosmos DB before emitting `done`
+- **Endpoints:**
+  - `POST /chat/stream` — primary, returns `text/event-stream`
+  - `POST /chat` — non-streaming fallback
 - **Model:** Claude Sonnet 4.6 via Azure AI Foundry
 - **Tool definitions:** One tool registered per specialist agent
 
@@ -184,7 +191,7 @@ If a specialist agent fails, the coordinator returns partial results with a clea
 
 ## Data Flow
 
-### Standard conversational request
+### Standard conversational request (SSE streaming)
 
 ```
 User hits vigil.{domain}.com
@@ -203,14 +210,15 @@ ISE issues SAML token → React UI
         ↓
 Agent Gateway (token validation, tenant ID extraction, rate limit, token budget)
         ↓
-Coordinator Agent (loads conversation history from Cosmos DB)
-        ↓
-[Specialist agents as needed]
-        ↓
-Azure AI Foundry (Claude Sonnet 4.6)
-        ↓
-Coordinator assembles response → Cosmos DB (history + audit log)
-        ↓
+Coordinator Agent (loads conversation + tenant config from Cosmos DB)
+        ↓ SSE: session_start
+[Specialist agents — parallel where Claude returns multiple tool calls]
+        ↓ SSE: agent_start (per agent, in immediate succession)
+        ↓ SSE: agent_complete / agent_error (as each finishes, real-time)
+Azure AI Foundry (Claude Sonnet 4.6 — final response, streaming)
+        ↓ SSE: token (per token)
+Coordinator writes conversation + audit log → Cosmos DB
+        ↓ SSE: done (tokens_used, session_id)
 React UI → User
 ```
 
@@ -228,18 +236,72 @@ Coordinator → Network Agent
               ISE logs all command authorisations
 ```
 
-### Multi-agent audit workflow
+### Multi-agent audit workflow (parallel execution)
 
 ```
 User: "Audit the perimeter firewall and raise a ticket for critical findings"
 
 Coordinator:
-  Step 1 → Network Agent → pulls firewall config via SSH
-  Step 2 → Enrichment Agent (with findings) → CVE lookup, EoX check
-  Step 3 → RAG Agent (with critical findings) → compliance doc lookup
-  Step 4 → ITSM Agent (critical findings only) → raises Jira ticket
-  Assembles → consolidated report with ticket reference
+  Claude returns tool_use: [network_agent, enrichment_agent]  ← parallel
+    SSE: agent_start (network_agent, detail: "10.0.0.1")
+    SSE: agent_start (enrichment_agent, detail: null)
+    asyncio.as_completed() fans both out concurrently
+    SSE: agent_complete (enrichment_agent, 890ms)  ← finished first
+    SSE: agent_complete (network_agent, 1240ms)    ← finished second
+
+  Claude returns tool_use: [rag_agent, itsm_agent]  ← parallel
+    SSE: agent_start (rag_agent)
+    SSE: agent_start (itsm_agent)
+    asyncio.as_completed() fans both out concurrently
+    SSE: agent_complete (rag_agent, 620ms)
+    SSE: agent_complete (itsm_agent, 1100ms)
+
+  Claude streams final response → SSE: token (per token)
+  Cosmos DB write → SSE: done
 ```
+
+---
+
+## SSE Streaming Design
+
+### Overview
+
+All chat responses use Server-Sent Events. The Coordinator owns the SSE stream; the Gateway proxies it non-buffered to the UI. The UI uses `fetch` + `ReadableStream` (not `EventSource`, which is GET-only).
+
+### Event flow
+
+```
+Coordinator                     Gateway (proxy)                  React UI
+    |                               |                               |
+    |── session_start ─────────────>|── session_start ────────────>|
+    |── agent_start ───────────────>|── agent_start ──────────────>|  (all parallel agents)
+    |── agent_start ───────────────>|── agent_start ──────────────>|
+    |── agent_complete ────────────>|── agent_complete ───────────>|  (as each finishes)
+    |── agent_complete ────────────>|── agent_complete ───────────>|
+    |── token ──────────────────── >|── token ────────────────────>|  (per token)
+    |── [Cosmos DB write] ─────────|                               |
+    |── done ───────────────────── >|── done (budget deduction) ──>|
+```
+
+### SSE event schema
+
+| Event | Fields | Notes |
+|---|---|---|
+| `session_start` | `session_id`, `tenant_id` | First event on every stream |
+| `agent_start` | `agent`, `detail: string\|null` | `detail` is agent-defined context (e.g. device host); emitted before execution begins |
+| `agent_complete` | `agent`, `duration_ms` | Fires immediately as each agent finishes — not batched |
+| `agent_error` | `agent`, `error` | Non-fatal — coordinator continues with partial results |
+| `token` | `content` | One token of Claude's streamed final response |
+| `done` | `tokens_used`, `session_id` | Emitted after Cosmos DB write — guarantees audit integrity |
+| `error` | `code`, `message` | Fatal: `budget_exceeded`, `rate_limited`, `coordinator_unavailable` |
+
+### Cosmos DB write ordering
+
+The Coordinator writes the conversation and audit log to Cosmos DB **before** emitting `done`. If the write fails, `done` is never sent and the UI surfaces an error. This guarantees every completed interaction has a corresponding audit log entry.
+
+### Gateway budget accounting
+
+The Gateway scans the proxied byte stream for the `done` event to extract `tokens_used` and deduct from the tenant budget in Cosmos DB. If the stream ends without a `done` event (client disconnect, upstream failure), the Coordinator's Cosmos DB entry is the authoritative record — the Gateway logs an incomplete session without attempting a budget deduction.
 
 ---
 

@@ -194,6 +194,147 @@ JIRA_API_TOKEN = kv_client.get_secret("jira-api-token").value
 
 ---
 
+## SSE Streaming Patterns
+
+### Coordinator — streaming endpoint
+
+Every chat request uses the streaming endpoint. The non-streaming `POST /chat` exists as a fallback only.
+
+```python
+from fastapi.responses import StreamingResponse
+import json
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_generator(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
+
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+```
+
+### Coordinator — parallel agent execution with real-time SSE
+
+Use `asyncio.as_completed()` — not `asyncio.gather()`. `gather()` batches completions; `as_completed()` emits each event immediately as each agent finishes.
+
+```python
+import asyncio
+
+async def _stream_generator(request: ChatRequest):
+    yield _sse({"type": "session_start", "session_id": request.session_id, "tenant_id": request.tenant_id})
+
+    # When Claude returns multiple tool_use blocks, fan out with as_completed()
+    tool_calls = [network_agent_call(...), enrichment_agent_call(...)]
+
+    # Emit all agent_start events before any execution begins
+    for call in tool_calls:
+        yield _sse({"type": "agent_start", "agent": call.agent_name, "detail": call.detail})
+
+    # Execute concurrently, emit completion events as each finishes
+    futures = {asyncio.ensure_future(call.run()): call for call in tool_calls}
+    for future in asyncio.as_completed(futures):
+        call = futures[future]
+        try:
+            result = await future
+            yield _sse({"type": "agent_complete", "agent": call.agent_name, "duration_ms": result.duration_ms})
+        except Exception as e:
+            yield _sse({"type": "agent_error", "agent": call.agent_name, "error": str(e)})
+
+    # Stream Claude's final response token by token
+    async for token in claude_stream_response(...):
+        yield _sse({"type": "token", "content": token})
+
+    # Write to Cosmos DB BEFORE emitting done — audit integrity guarantee
+    await write_conversation_and_audit(request, total_tokens)
+
+    yield _sse({"type": "done", "tokens_used": total_tokens, "session_id": request.session_id})
+```
+
+### Gateway — non-buffered SSE proxy
+
+The Gateway proxies the Coordinator's stream without buffering. It scans for the `done` event to capture `tokens_used` for budget accounting.
+
+```python
+import httpx
+
+async def _proxy_stream(request: ChatRequest, tenant_id: str):
+    async with httpx.AsyncClient() as client:
+        async with client.stream("POST", COORDINATOR_URL + "/chat/stream", json=request.dict()) as response:
+            tokens_used = None
+            async for chunk in response.aiter_bytes():
+                if b'"type": "done"' in chunk:
+                    try:
+                        data = json.loads(chunk.split(b"data: ", 1)[1])
+                        tokens_used = data.get("tokens_used")
+                    except Exception:
+                        pass
+                yield chunk
+            if tokens_used is not None:
+                await update_tenant_budget(tenant_id, tokens_used)
+            else:
+                await log_incomplete_session(tenant_id, request.session_id)
+
+@app.post("/chat/stream")
+async def chat_stream_proxy(request: ChatRequest, tenant_id: str = Depends(extract_tenant)):
+    # auth, rate limit, budget checks happen before this point
+    return StreamingResponse(
+        _proxy_stream(request, tenant_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+```
+
+### UI — SSE client (fetch, not EventSource)
+
+**Never use `EventSource`** — it only supports GET requests. Use `fetch` with `ReadableStream`.
+
+```typescript
+// services/ui/src/hooks/useStream.ts
+async function* streamChat(request: ChatRequest): AsyncGenerator<SSEEvent> {
+    const response = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+    });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop()!;
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                yield JSON.parse(line.slice(6)) as SSEEvent;
+            }
+        }
+    }
+}
+```
+
+### SSE event types
+
+| Event | Fields | UI action |
+|---|---|---|
+| `session_start` | `session_id`, `tenant_id` | Initialise sidebar entry for this message |
+| `agent_start` | `agent`, `detail` | Add agent row to sidebar (amber dot) |
+| `agent_complete` | `agent`, `duration_ms` | Update row (green dot, timing) |
+| `agent_error` | `agent`, `error` | Update row (red dot, error) |
+| `token` | `content` | Append token to message bubble |
+| `done` | `tokens_used`, `session_id` | Finalise message, update token counter |
+| `error` | `code`, `message` | Show error in message bubble, close stream |
+
+---
+
 ## Coordinator Tool Registration Pattern
 
 Every specialist agent is a Claude tool in the coordinator. Follow this exactly:
@@ -396,6 +537,10 @@ pytest tests/
 - Skip the `/health` endpoint on any new service
 - Leave `ARCHITECTURE.md` or `CLAUDE.md` out of date after changing the system
 - Hardcode values in Terraform — use variables
+- Use `EventSource` for SSE — it is GET-only and cannot send a request body; always use `fetch` + `ReadableStream`
+- Use `asyncio.gather()` for parallel agent calls — use `asyncio.as_completed()` so `agent_complete` events emit in real time as each agent finishes, not batched after the slowest
+- Emit `done` before writing to Cosmos DB — the write must complete first to guarantee audit integrity
+- Buffer the SSE stream in the Gateway — use `httpx.AsyncClient` with `aiter_bytes()` and `StreamingResponse`
 
 ---
 
