@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+azure-cosmos
+azure-keyvault-secrets
+azure-identity
+azure-communication-email
+httpx
+python-dotenv
+pytest
+pytest-asyncio
