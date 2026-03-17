@@ -50,10 +50,11 @@ DESIGN_AGENT_URL
 TROUBLESHOOT_AGENT_URL
 ```
 
-### New troubleshoot agent env var
+### New troubleshoot agent env vars
 
 ```
-PROBE_URL   # internal URL of agent-probe
+PROBE_URL              # internal URL of agent-probe
+PROBE_TIMEOUT_SECONDS  # default: 20 — probe kills process and returns error after this duration
 ```
 
 ---
@@ -271,11 +272,15 @@ The Troubleshoot Agent writes an `audit_logs` entry for every probe invocation (
     "tier": "show" | "invasive" | "config",
     "step_up_request_id": str | None,
     "emergency": bool,
-    "outcome": "success" | "error" | "rejected",
+    "outcome": "success" | "error" | "rejected" | "interrupted",
     "duration_ms": int,
+    "tokens_used": int,           # Claude tool-selection tokens; 0 for show-tier (no internal Claude call)
+    "budget_deducted": bool,      # false on write; set to true by Gateway reconciliation task
     "timestamp": str
 }
 ```
+
+On non-interrupted streams, `budget_deducted` is set to `true` immediately on write (the `done` event handles deduction via the existing Gateway path). On interrupted streams, `budget_deducted` starts `false` and is updated by the reconciliation task.
 
 ### Firewall Connector Registry
 
@@ -351,7 +356,16 @@ The Troubleshoot Agent uses Claude internally to select tools and execution orde
 | `config_change_jira` | `ticket_id`, `tool`, `target` |
 | `done` | `tokens_used`, `session_id` — emitted after Cosmos DB write on successful (non-interrupted) stream termination |
 
-**Stream termination on step-up interrupt:** When a tool requires invasive or config-tier approval, the Troubleshoot Agent emits `probe_warning` as the final event and terminates the stream. No `done` event is emitted on interrupted streams. The Gateway's `log_incomplete_session` path handles this correctly — it is the intended outcome. Tokens consumed by the internal Claude tool-selection call are small and are written to the `audit_logs` entry; they are not budget-deducted via the `done` event on interrupted paths (acceptable loss on a gated operation).
+**Stream termination on step-up interrupt:** When a tool requires invasive or config-tier approval, the Troubleshoot Agent emits `probe_warning` as the final event and terminates the stream. No `done` event is emitted on interrupted streams. The Gateway's `log_incomplete_session` path handles this correctly — it is the intended outcome.
+
+**Compensating budget deduction for interrupted streams:** Tokens consumed by the internal Claude tool-selection call on an interrupted path must still be deducted from the tenant budget. The mechanism:
+
+1. The `audit_logs` entry written on interrupt includes two additional fields: `tokens_used: int` and `budget_deducted: false`.
+2. The Gateway runs a background reconciliation task (alongside the existing `_run_recovery_loop` pattern in the coordinator) that periodically scans `audit_logs` for entries where `budget_deducted == false` and `tokens_used > 0`, partitioned per tenant.
+3. For each such entry, the task deducts `tokens_used` from the tenant budget in Cosmos DB and updates `audit_logs` to `budget_deducted: true`.
+4. Reconciliation runs every 5 minutes. Atomic update pattern (optimistic concurrency via ETag) prevents double-deduction on concurrent runs.
+
+This ensures all token consumption — including from interrupted gated operations — is accounted for in tenant budgets, with no changes needed to the SSE or Gateway stream path.
 
 ---
 
@@ -520,7 +534,8 @@ Per-service minimum (per CLAUDE.md):
 - Config-tier tools create `step_up_requests` + Jira ticket via `agent-itsm`; `emergency=True` skips Jira
 - `emergency=True` without `emergency_change` SAML claim returns 403
 - `step_up_grant_id` on re-submission validates grant before probe dispatch
-- Audit log entry written for every probe invocation
+- Audit log entry written for every probe invocation including `tokens_used` and `budget_deducted`
+- Interrupted stream audit entry has `budget_deducted: false`; reconciliation task flips it to `true` and deducts from budget
 - Tenant isolation on `step_up_requests` reads
 
 **agent-probe:**
