@@ -48,9 +48,23 @@ Coordinator: dispatch tool call
 
 - `apply_change` and `rollback_change` approval logic is migrated from bespoke coordinator code onto this mechanism
 - `POST /changes/{change_id}/apply` is replaced by `POST /step-up/{request_id}/approve`
+- `POST /changes/{change_id}/reject` is replaced by `POST /step-up/{request_id}/reject`
+- `POST /changes/{change_id}/acknowledge-drift` and `POST /changes/{change_id}/abort` are **retained** — these are change-lifecycle operations, not approval events, and are outside the scope of step-up auth
 - Key Vault write credentials are fetched just-in-time after approval — not cached at startup
 - The Network Agent's internal guard (`if record["status"] != "approved": raise`) is retained as defence-in-depth
 - `change_records` is retained — it records the full change lifecycle (diff, pre-change config, commands, rollback). `approved_by` is written to both `step_up_requests` and `change_records`
+
+### Updated Coordinator endpoint list (post-migration)
+
+```
+POST /chat/stream                          # unchanged
+POST /chat                                 # unchanged (non-streaming fallback)
+POST /step-up/{request_id}/approve         # new — replaces /changes/{id}/apply
+POST /step-up/{request_id}/reject          # new — replaces /changes/{id}/reject
+POST /changes/{change_id}/acknowledge-drift  # retained — change lifecycle, not approval
+POST /changes/{change_id}/abort            # retained — change lifecycle, not approval
+GET  /health                               # unchanged
+```
 
 ---
 
@@ -95,17 +109,39 @@ pending → approved → (tool dispatched)
 
 Active time-window grants. Partitioned by `tenant_id`. Cosmos DB TTL set to `grant_duration_seconds` — documents auto-expire.
 
+**Grant scope: session-scoped.** A grant is tied to the `session_id` in which it was approved. A user who closes their browser and opens a new session does not inherit grants from previous sessions. This is intentional — the approval is tied to a specific conversation context, not the user identity indefinitely.
+
 ```python
 {
     "id": "grnt-{uuid}",
     "tenant_id": "tenant-a",
-    "session_id": "s-abc123",
+    "session_id": "s-abc123",          # grant is only valid for this session
     "tool_name": "bulk_close_tickets",
     "approved_by": "senior-eng@client.com",
     "granted_at": "2026-03-17T10:01:00Z",
     "expires_at": "2026-03-17T10:31:00Z",
-    "_ttl": 1800                               # Cosmos DB TTL in seconds
+    "_ttl": 1800                        # Cosmos DB TTL in seconds — auto-deletes on expiry
 }
+```
+
+**Grant lookup pattern** — `get_active_grant(tenant_id, session_id, tool_name)`:
+
+```python
+async def get_active_grant(tenant_id: str, session_id: str, tool_name: str) -> dict | None:
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    results = list(grants_container.query_items(
+        query="""SELECT * FROM c
+                 WHERE c.session_id = @session_id
+                   AND c.tool_name  = @tool_name
+                   AND c.expires_at  > @now""",
+        parameters=[
+            {"name": "@session_id", "value": session_id},
+            {"name": "@tool_name",  "value": tool_name},
+            {"name": "@now",        "value": now_iso},
+        ],
+        partition_key=tenant_id  # always tenant-scoped
+    ))
+    return results[0] if results else None
 ```
 
 ### `tenant_config` additions
@@ -157,59 +193,109 @@ Tools absent from `step_up_policy` have no gate and are dispatched immediately.
 
 Owns the full step-up lifecycle: policy lookup, request creation, polling, grant management, and Key Vault fetch.
 
-### Agentic loop modification — `services/coordinator/agent_loop.py`
+### Calling contract — `agent_loop.py` owns SSE, `step_up.py` owns lifecycle
 
-Before dispatching any tool call:
+`_dispatch_tool_call` is a plain `async def` that returns the agent result or `None` (on rejection/expiry/failure). The calling loop in `agent_loop.py` emits all SSE events — `_dispatch_tool_call` never yields. `step_up.py` functions return typed `StepUpResult` objects that the loop inspects to decide which events to emit.
 
 ```python
-async def _dispatch_tool_call(tool_name, tool_input, request, tenant_config):
-    policy = tenant_config.get("step_up_policy", {}).get(tool_name)
+# step_up.py — return type, not an SSE emitter
+@dataclass
+class StepUpResult:
+    status: str           # "approved" | "rejected" | "expired" | "failed"
+    request_id: str
+    approved_by: str | None
+    credential: str | None   # populated only on "approved"
 
-    if policy is None:
-        return await _call_agent(tool_name, tool_input, request)
+async def handle_step_up(
+    tool_name: str,
+    tool_input: dict,
+    request: ChatRequest,
+    tenant_config: dict,
+) -> StepUpResult:
+    policy = tenant_config["step_up_policy"][tool_name]
 
     if policy["grant_type"] == "time_window":
         grant = await get_active_grant(request.tenant_id, request.session_id, tool_name)
         if grant:
-            return await _call_agent(tool_name, tool_input, request)
+            return StepUpResult(status="approved", request_id=grant["id"],
+                                approved_by=grant["approved_by"], credential=None)
 
     step_up_req = await create_step_up_request(tool_name, tool_input, request, policy)
 
-    if "email" in policy["notification_channels"]:
-        await notify_approvers(step_up_req, tenant_config)  # fire-and-forget
+    if "email" in policy["notification_channels"] or "webhook" in policy["notification_channels"]:
+        asyncio.ensure_future(notify_approvers(step_up_req, tenant_config))  # fire-and-forget
 
-    yield _sse({
-        "type": "approval_required",
-        "request_id": step_up_req["id"],
-        "tool": tool_name,
-        "context": step_up_req["context"],
-        "approver_type": "self" if policy["self_approve"] else "designated",
-        "expires_at": step_up_req["expires_at"],
-    })
-
+    # caller emits approval_required SSE using step_up_req["id"], ["context"], ["expires_at"]
     decision = await await_step_up_decision(step_up_req["id"], request.tenant_id, policy)
 
     if decision["status"] in ("rejected", "expired"):
-        yield _sse({"type": f"approval_{decision['status']}",
-                    "request_id": step_up_req["id"], "tool": tool_name,
-                    "decided_by": decision.get("approved_by")})
-        return None  # graceful degradation — coordinator continues with partial results
+        return StepUpResult(status=decision["status"], request_id=step_up_req["id"],
+                            approved_by=decision.get("approved_by"), credential=None)
 
     try:
         credential = await fetch_tool_credential(tool_name, request.tenant_id)
-    except Exception as e:
+    except Exception:
         await mark_step_up_failed(step_up_req["id"], request.tenant_id)
-        yield _sse({"type": "agent_error", "agent": tool_name, "error": "credential_fetch_failed"})
-        return None
+        return StepUpResult(status="failed", request_id=step_up_req["id"],
+                            approved_by=decision["approved_by"], credential=None)
 
     if policy["grant_type"] == "time_window":
         await write_active_grant(tool_name, decision["approved_by"], request, policy)
 
-    yield _sse({"type": "approval_granted", "request_id": step_up_req["id"],
-                "tool": tool_name, "approved_by": decision["approved_by"]})
-
-    return await _call_agent(tool_name, tool_input, request, credential=credential)
+    return StepUpResult(status="approved", request_id=step_up_req["id"],
+                        approved_by=decision["approved_by"], credential=credential)
 ```
+
+```python
+# agent_loop.py — loop emits all SSE events, calls step_up.handle_step_up()
+async def _dispatch_tool_call(
+    tool_name: str,
+    tool_input: dict,
+    request: ChatRequest,
+    tenant_config: dict,
+) -> tuple[str | None, list[str]]:
+    """Returns (agent_result, list_of_sse_strings)."""
+    policy = tenant_config.get("step_up_policy", {}).get(tool_name)
+
+    if policy is None:
+        result = await _call_agent(tool_name, tool_input, request)
+        return result, []
+
+    # Initiate step-up — result contains status and credential
+    step_up_req_preview = await preview_step_up_request(tool_name, tool_input, request, policy)
+    sse_events = [_sse({
+        "type": "approval_required",
+        "request_id": step_up_req_preview["id"],
+        "tool": tool_name,
+        "context": step_up_req_preview["context"],
+        "approver_type": "self" if policy["self_approve"] else "designated",
+        "expires_at": step_up_req_preview["expires_at"],
+    })]
+
+    result = await handle_step_up(tool_name, tool_input, request, tenant_config)
+
+    if result.status == "rejected":
+        sse_events.append(_sse({"type": "approval_rejected", "request_id": result.request_id,
+                                "tool": tool_name, "decided_by": result.approved_by}))
+        return None, sse_events
+
+    if result.status == "expired":
+        sse_events.append(_sse({"type": "approval_expired", "request_id": result.request_id,
+                                "tool": tool_name}))
+        return None, sse_events
+
+    if result.status == "failed":
+        sse_events.append(_sse({"type": "agent_error", "agent": tool_name,
+                                "error": "credential_fetch_failed"}))
+        return None, sse_events
+
+    sse_events.append(_sse({"type": "approval_granted", "request_id": result.request_id,
+                             "tool": tool_name, "approved_by": result.approved_by}))
+    agent_result = await _call_agent(tool_name, tool_input, request, credential=result.credential)
+    return agent_result, sse_events
+```
+
+The calling generator in `agent_loop.py` iterates over the returned `sse_events` list and yields each one into the SSE stream before yielding agent progress events.
 
 ### Polling strategy
 
@@ -219,15 +305,29 @@ async def _dispatch_tool_call(tool_name, tool_input, request, tenant_config):
 
 On startup and every 5 minutes, the coordinator scans `step_up_requests` for records stuck in `pending` with `expires_at` in the past and marks them `expired`. Mirrors the existing `applying_started_at` recovery for `change_records`.
 
+The task iterates over active tenant IDs sourced from the `tenant_config` container — this provides the `tenant_id` partition key for each per-tenant scan, preventing cross-partition queries.
+
 ```python
-stuck = container.query_items(
-    query="SELECT * FROM c WHERE c.status = 'pending' AND c.expires_at < @now",
-    parameters=[{"name": "@now", "value": now_iso}],
-    partition_key=tenant_id  # per-tenant scan
-)
-for record in stuck:
-    record["status"] = "expired"
-    container.replace_item(item=record["id"], body=record, partition_key=tenant_id)
+async def recover_expired_step_up_requests():
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    # Get all active tenant IDs from tenant_config (one document per tenant)
+    tenant_ids = [
+        doc["tenant_id"]
+        for doc in tenant_config_container.read_all_items()
+    ]
+
+    for tenant_id in tenant_ids:
+        stuck = step_up_container.query_items(
+            query="SELECT * FROM c WHERE c.status = 'pending' AND c.expires_at < @now",
+            parameters=[{"name": "@now", "value": now_iso}],
+            partition_key=tenant_id  # always scoped to one tenant
+        )
+        for record in stuck:
+            record["status"] = "expired"
+            step_up_container.replace_item(
+                item=record["id"], body=record, partition_key=tenant_id
+            )
 ```
 
 ### New endpoints — `services/coordinator/main.py`
@@ -250,6 +350,8 @@ Violations return structured 403 responses with `reason` field. All attempts (ap
 ## Notification Helper — `services/coordinator/notifications.py`
 
 Fire-and-forget. Sends approval requests to configured out-of-band channels. Notification failure is logged and never blocks the in-chat approval path.
+
+Approval URLs point to the Gateway's `/step-up/` proxy routes (see Gateway Changes below) so approvers clicking links from email reach a fully auth-gated endpoint.
 
 ```python
 async def notify_approvers(step_up_request: dict, tenant_config: dict):
@@ -276,15 +378,32 @@ Email is sent via Azure Communication Services (Managed Identity — no new cred
 
 ---
 
+## Gateway Changes — `services/gateway/main.py`
+
+Two new proxy routes are added to the Gateway, following the same middleware chain as all other routes (ISE token validation → tenant extraction → rate limit check → proxy):
+
+```
+POST /step-up/{request_id}/approve
+POST /step-up/{request_id}/reject
+```
+
+These proxy directly to `COORDINATOR_URL/step-up/{request_id}/approve` and `/reject` without buffering. The response is a simple JSON acknowledgement (not SSE), so no streaming proxy is required — a standard `httpx` POST and response forwarding is sufficient.
+
+The Gateway does not perform the authorisation check (approver list membership, self-approval guard) — that logic lives in the Coordinator. The Gateway's responsibility is auth (ISE token valid) and rate limiting only, consistent with its existing role.
+
+---
+
 ## Key Vault Integration
 
-Write credentials are fetched just-in-time after approval, not at startup. Secret naming follows the existing namespace convention:
+Write credentials are fetched just-in-time after approval, not at startup. Secret naming follows the existing namespace convention, with underscores in tool names replaced by hyphens (Key Vault secret names only permit alphanumeric characters and hyphens):
 
 ```
-tenant-{tenant_id}-{tool_name}-write-credential
+tenant-{tenant_id}-{tool-name}-write-credential
 ```
 
-Example: `tenant-acme-apply_change-write-credential`
+Examples:
+- `tenant-acme-apply-change-write-credential`
+- `tenant-acme-rollback-change-write-credential`
 
 The coordinator does not cache these secrets in module scope. Each approved invocation performs a fresh Key Vault read. This ensures that revoking the secret in Key Vault takes effect immediately without a container restart.
 
@@ -354,12 +473,13 @@ All existing multi-tenancy rules apply. Additions:
 
 | File | Type | Purpose |
 |---|---|---|
-| `services/coordinator/step_up.py` | New | Step-up lifecycle: request creation, polling, grant management, Key Vault fetch |
-| `services/coordinator/notifications.py` | New | Out-of-band notification helper (email + webhook) |
-| `services/coordinator/agent_loop.py` | Modified | Pre-dispatch step-up check; SSE events for approval flow |
-| `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve` and `POST /step-up/{id}/reject` endpoints |
-| `infrastructure/terraform/modules/cosmos-db/main.tf` | Modified | Add `step_up_requests` and `step_up_grants` containers with TTL |
-| `ARCHITECTURE.md` | Modified | Document step-up auth in Security Model and Data Flow sections |
+| `services/coordinator/step_up.py` | New | `StepUpResult`, `handle_step_up`, `get_active_grant`, `write_active_grant`, `create_step_up_request`, `await_step_up_decision`, `fetch_tool_credential`, `recover_expired_step_up_requests` |
+| `services/coordinator/notifications.py` | New | Out-of-band notification helper (email via ACS + webhook) |
+| `services/coordinator/agent_loop.py` | Modified | Pre-dispatch step-up check via `handle_step_up`; loop emits all SSE approval events |
+| `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve`, `POST /step-up/{id}/reject`; remove `POST /changes/{id}/apply`, `POST /changes/{id}/reject` |
+| `services/gateway/main.py` | Modified | Add proxy routes `POST /step-up/{id}/approve` and `POST /step-up/{id}/reject` with standard auth middleware |
+| `infrastructure/terraform/modules/cosmos-db/main.tf` | Modified | Add `step_up_requests` container (partitioned by `tenant_id`) and `step_up_grants` container (partitioned by `tenant_id`, TTL enabled) |
+| `ARCHITECTURE.md` | Modified | Update: Coordinator endpoint list (Security Model), `step_up_requests` and `step_up_grants` containers (Data Model), new SSE events (SSE Streaming Design), step-up row in Multi-Tenancy table |
 
 ---
 
