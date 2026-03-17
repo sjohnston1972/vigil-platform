@@ -145,6 +145,8 @@ If you are writing code that touches data and there is no `tenant_id` filter —
 - `audit_logs` — partitioned by `tenant_id`, keyed by timestamp
 - `tenant_config` — partitioned by `tenant_id`, one document per tenant
 - `change_records` — partitioned by `tenant_id`, keyed by `change_id` — full lifecycle of every proposed network change
+- `step_up_requests` — partitioned by `tenant_id`, keyed by `request_id` — pending/decided approval gates
+- `step_up_grants` — partitioned by `tenant_id`, `default_ttl = -1` required — active time-window grants (TTL = `grant_duration_seconds`)
 
 ### Always use partition key
 
@@ -192,6 +194,11 @@ kv_client = SecretClient(
 # Fetch once at startup, cache in module scope
 JIRA_API_TOKEN = kv_client.get_secret("jira-api-token").value
 ```
+
+**Exception — step-up write credentials:** Write credentials for step-up gated tools
+(`apply_change`, `rollback_change`, etc.) are fetched just-in-time after approval, not at
+startup, and are not cached in module scope. This is the only approved exception to the
+startup-fetch rule. All other secrets follow the startup-fetch pattern above.
 
 ---
 

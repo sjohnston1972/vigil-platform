@@ -131,8 +131,8 @@ If a specialist agent fails, the coordinator returns partial results with a clea
 - **Endpoints:**
   - `POST /chat/stream` — primary, returns `text/event-stream`
   - `POST /chat` — non-streaming fallback
-  - `POST /changes/{change_id}/apply` — phase 2 approval
-  - `POST /changes/{change_id}/reject` — reject proposed change
+  - `POST /step-up/{request_id}/approve` — approve a pending step-up request
+  - `POST /step-up/{request_id}/reject` — reject a pending step-up request
   - `POST /changes/{change_id}/acknowledge-drift` — acknowledge config drift and resume apply
   - `POST /changes/{change_id}/abort` — abort in-flight change
 - **Model:** Claude Sonnet 4.6 via Azure AI Foundry
@@ -343,6 +343,10 @@ Coordinator                     Gateway (proxy)                  React UI
 | `agent_start` | `agent`, `detail: string\|null` | `detail` is agent-defined context (e.g. device host); emitted before execution begins |
 | `agent_complete` | `agent`, `duration_ms` | Fires immediately as each agent finishes — not batched |
 | `agent_error` | `agent`, `error` | Non-fatal — coordinator continues with partial results |
+| `approval_required` | `request_id`, `tool`, `context`, `approver_type`, `expires_at` | Loop paused awaiting human approval; keepalive heartbeats sent every 30s |
+| `approval_granted` | `request_id`, `tool`, `approved_by` | Approval received, tool dispatching |
+| `approval_rejected` | `request_id`, `tool`, `decided_by` | Rejected — coordinator continues with partial results |
+| `approval_expired` | `request_id`, `tool` | Approval window elapsed without decision |
 | `token` | `content` | One token of Claude's streamed final response |
 | `done` | `tokens_used`, `session_id` | Emitted after Cosmos DB write — guarantees audit integrity |
 | `error` | `code`, `message` | Fatal: `budget_exceeded`, `rate_limited`, `coordinator_unavailable` |
@@ -436,6 +440,8 @@ Each tenant in VIGIL is isolated at every layer:
 | Change records | Cosmos DB partitioned by tenant ID — change_id lookups always use (change_id, tenant_id) |
 | Token budgets | Per-tenant daily/monthly limits enforced at Gateway |
 | Write capability | `write_enabled` flag per tenant in tenant_config — controls Network Agent write profile activation |
+| Step-up requests | Cosmos DB partitioned by tenant ID — pending/decided approval gates (`step_up_requests`) |
+| Step-up grants | Cosmos DB partitioned by tenant ID, TTL enabled — active time-window grants (`step_up_grants`) |
 | RAG knowledge base | Azure AI Search index filtered by tenant ID |
 | Cost tracking | Azure tags per tenant for cost allocation |
 
