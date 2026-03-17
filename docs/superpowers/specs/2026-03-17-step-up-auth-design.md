@@ -193,11 +193,13 @@ Tools absent from `step_up_policy` have no gate and are dispatched immediately.
 
 Owns the full step-up lifecycle: policy lookup, request creation, polling, grant management, and Key Vault fetch.
 
-### Calling contract — `agent_loop.py` owns SSE, `step_up.py` owns lifecycle
+### Calling contract — step-up logic runs inline in the stream generator
 
-`_dispatch_tool_call` is a plain `async def` that returns the agent result or `None` (on rejection/expiry/failure). The calling loop in `agent_loop.py` emits all SSE events — `_dispatch_tool_call` never yields. `step_up.py` functions return typed `StepUpResult` objects that the loop inspects to decide which events to emit.
+Step-up logic runs directly inside `_stream_generator` (the existing async generator in `agent_loop.py` that already yields SSE strings). This ensures `approval_required` is yielded to the client immediately — before `resolve_step_up` blocks on the polling loop. A helper that batches SSE strings into a list and returns them after the approval decision would prevent `approval_required` from reaching the client before the poll, making the feature non-functional.
 
-`step_up.py` exposes two functions to the loop: `prepare_step_up` (creates the request, sends notifications, returns the request doc or None if an active grant was found) and `resolve_step_up` (polls for the decision, fetches the credential, writes the grant). This two-step split lets the loop emit `approval_required` SSE in between — after the request exists in Cosmos DB but before blocking on the poll.
+**Parallelism note:** Tools with a `step_up_policy` entry are dispatched serially. Parallel fan-out via `asyncio.as_completed()` only applies to tools without a step-up gate. If Claude returns a batch where some tools require step-up and some do not, non-gated tools execute in parallel first; step-up tools follow serially.
+
+`step_up.py` exposes `prepare_step_up` (creates the request, dispatches notifications, returns the request document or `None` if an active grant exists) and `resolve_step_up` (polls for decision, fetches credential, writes grant). The stream generator calls both and yields SSE events between them.
 
 ```python
 # step_up.py
@@ -231,7 +233,7 @@ async def prepare_step_up(
     if "email" in policy["notification_channels"] or "webhook" in policy["notification_channels"]:
         asyncio.ensure_future(notify_approvers(step_up_req, tenant_config))  # fire-and-forget
 
-    return step_up_req  # caller emits approval_required SSE, then calls resolve_step_up
+    return step_up_req  # caller yields approval_required SSE immediately, then calls resolve_step_up
 
 async def resolve_step_up(
     step_up_req: dict,
@@ -264,83 +266,86 @@ async def resolve_step_up(
 ```
 
 ```python
-# agent_loop.py — loop emits all SSE events, calls prepare_step_up then resolve_step_up
+# agent_loop.py — step-up check inline in _stream_generator (already an async generator)
 
-async def _dispatch_tool_call(
-    tool_name: str,
-    tool_input: dict,
-    request: ChatRequest,
-    tenant_config: dict,
-) -> tuple[str | None, list[str]]:
-    """Returns (agent_result, list_of_sse_strings)."""
-    policy = tenant_config.get("step_up_policy", {}).get(tool_name)
+async def _stream_generator(request: ChatRequest, tenant_config: dict):
+    yield _sse({"type": "session_start", ...})
 
-    if policy is None:
-        result = await _call_agent(tool_name, tool_input, request)
-        return result, []
+    # ... Claude returns tool calls ...
+    # Non-gated tools are fanned out in parallel with asyncio.as_completed() as before.
+    # Step-up gated tools are handled serially in this block:
 
-    sse_events: list[str] = []
+    for tool_call in step_up_tool_calls:
+        tool_name  = tool_call["name"]
+        tool_input = tool_call["input"]
+        policy     = tenant_config["step_up_policy"][tool_name]
 
-    # Step 1: create request (or find active grant)
-    step_up_req = await prepare_step_up(tool_name, tool_input, request, policy, tenant_config)
+        step_up_req = await prepare_step_up(tool_name, tool_input, request, policy, tenant_config)
 
-    if step_up_req is not None:
-        # New approval needed — emit approval_required before blocking on poll
-        sse_events.append(_sse({
-            "type": "approval_required",
-            "request_id": step_up_req["id"],
-            "tool": tool_name,
-            "context": step_up_req["context"],
-            "approver_type": "self" if policy["self_approve"] else "designated",
-            "expires_at": step_up_req["expires_at"],
-        }))
+        if step_up_req is not None:
+            # Yield immediately — client sees approval prompt before poll begins
+            yield _sse({
+                "type": "approval_required",
+                "request_id": step_up_req["id"],
+                "tool": tool_name,
+                "context": step_up_req["context"],
+                "approver_type": "self" if policy["self_approve"] else "designated",
+                "expires_at": step_up_req["expires_at"],
+            })
 
-        # Step 2: block until decision
-        result = await resolve_step_up(step_up_req, request, policy)
+            step_up_result = await resolve_step_up(step_up_req, request, policy)
 
-        if result.status == "rejected":
-            sse_events.append(_sse({"type": "approval_rejected", "request_id": result.request_id,
-                                    "tool": tool_name, "decided_by": result.approved_by}))
-            return None, sse_events
+            if step_up_result.status == "rejected":
+                yield _sse({"type": "approval_rejected",
+                             "request_id": step_up_result.request_id, "tool": tool_name,
+                             "decided_by": step_up_result.approved_by})
+                continue
 
-        if result.status == "expired":
-            sse_events.append(_sse({"type": "approval_expired",
-                                    "request_id": result.request_id, "tool": tool_name}))
-            return None, sse_events
+            if step_up_result.status == "expired":
+                yield _sse({"type": "approval_expired",
+                             "request_id": step_up_result.request_id, "tool": tool_name})
+                continue
 
-        if result.status == "failed":
-            sse_events.append(_sse({"type": "agent_error", "agent": tool_name,
-                                    "error": "credential_fetch_failed"}))
-            return None, sse_events
+            if step_up_result.status == "failed":
+                yield _sse({"type": "agent_error", "agent": tool_name,
+                             "error": "credential_fetch_failed"})
+                continue
 
-        sse_events.append(_sse({"type": "approval_granted", "request_id": result.request_id,
-                                 "tool": tool_name, "approved_by": result.approved_by}))
-        credential = result.credential
-    else:
-        # Active time-window grant exists — proceed silently, no SSE events
-        credential = None
+            yield _sse({"type": "approval_granted",
+                         "request_id": step_up_result.request_id, "tool": tool_name,
+                         "approved_by": step_up_result.approved_by})
+            credential = step_up_result.credential
+        else:
+            credential = None  # active time-window grant — proceed silently
 
-    agent_result = await _call_agent(tool_name, tool_input, request, credential=credential)
-    return agent_result, sse_events
+        agent_result = await _call_agent(tool_name, tool_input, request, credential=credential)
+        # feed agent_result back to Claude ...
+
+    # ... stream final response, write Cosmos DB, emit done ...
 ```
-
-The calling generator in `agent_loop.py` iterates over the returned `sse_events` list and yields each string into the SSE stream.
 
 ### Polling strategy
 
 `await_step_up_decision` polls Cosmos DB with exponential backoff (1s → 2s → 4s → max 10s) until status changes or `expires_at` is reached. Uses partition key `(request_id, tenant_id)` on every read.
 
+**Maximum poll duration:** Capped at `pending_ttl_seconds` from the tool's policy. If the cap is reached and the record is still `pending`, the function marks it `expired` and returns.
+
+**SSE keepalive during long polls:** The stream generator yields a keepalive heartbeat every 30 seconds while polling. This prevents Azure Container Apps' idle connection timeout from closing the SSE stream before the human approves. The heartbeat is a comment line (`: keepalive\n\n`) per SSE spec, invisible to the UI event parser.
+
+**ACA timeout configuration:** The Container Apps ingress request timeout must be set to at least `max(pending_ttl_seconds) + 60s` across all tools in the policy. This is a Terraform variable in `container-apps/main.tf`. The Terraform module update is included in the Terraform files change below.
+
 ### Startup recovery task
 
 On startup and every 5 minutes, the coordinator scans `step_up_requests` for records stuck in `pending` with `expires_at` in the past and marks them `expired`. Mirrors the existing `applying_started_at` recovery for `change_records`.
 
-The task iterates over active tenant IDs sourced from the `tenant_config` container — this provides the `tenant_id` partition key for each per-tenant scan, preventing cross-partition queries.
+The task iterates over active tenant IDs sourced from the `tenant_config` container. `tenant_config_container.read_all_items()` is a cross-partition fan-out read — the only permitted cross-partition query in this service, used solely as a bootstrap step to obtain the tenant ID list. All subsequent queries use those tenant IDs as partition keys. This must be documented with an inline comment in the implementation.
 
 ```python
 async def recover_expired_step_up_requests():
     now_iso = datetime.utcnow().isoformat() + "Z"
 
-    # Get all active tenant IDs from tenant_config (one document per tenant)
+    # INTENTIONAL cross-partition read — bootstrap only. This is the only permitted
+    # cross-partition query in this service. All subsequent queries use partition keys.
     tenant_ids = [
         doc["tenant_id"]
         for doc in tenant_config_container.read_all_items()
@@ -369,10 +374,33 @@ POST /step-up/{request_id}/reject
 Both require a valid ISE token (enforced at Gateway). The coordinator checks:
 1. `request_id` exists and belongs to caller's `tenant_id`
 2. `status == "pending"` and `expires_at` not passed
-3. If `self_approve: false` — caller is in `step_up_approvers` AND is not `requested_by`
-4. If `self_approve: true` — caller is `requested_by` OR is in `step_up_approvers`
+3. If `self_approve: false` — caller is in `step_up_approvers` AND is not `requested_by` (applies to both approve and reject)
+4. If `self_approve: true` — caller is `requested_by` OR is in `step_up_approvers` (applies to both approve and reject)
 
-Violations return structured 403 responses with `reason` field. All attempts (approved, rejected, and forbidden) are written to the audit log.
+The same authorisation rules apply symmetrically to both endpoints. A requesting user may reject their own self-approve-eligible request.
+
+**Pydantic models:**
+
+```python
+class StepUpDecisionRequest(BaseModel):
+    comment: str | None = None   # optional human-readable reason (for reject)
+
+class StepUpDecisionResponse(BaseModel):
+    request_id: str
+    status: str              # "approved" | "rejected"
+    decided_by: str
+    decided_at: str          # ISO 8601
+
+class StepUpErrorResponse(BaseModel):
+    error: str               # "not_authorised_approver" | "self_approval_not_permitted" |
+                             # "request_not_found" | "already_decided" | "request_expired"
+    request_id: str
+    detail: str | None = None
+```
+
+`StepUpDecisionResponse` is returned on 200. `StepUpErrorResponse` is returned on 403 and 409. All attempts — approved, rejected, and forbidden — are written to the audit log.
+
+**`approved_by` propagation to `change_records`:** When a step-up request for `apply_change` or `rollback_change` is approved, the approve endpoint handler writes `approved_by` and `approved_at` to the corresponding `change_records` document in Cosmos DB. This is a direct Cosmos DB write by the Coordinator using `(change_id, tenant_id)` as the partition key — consistent with the Coordinator's existing Cosmos DB access for these containers. The `change_id` is read from `step_up_requests.context.change_id`.
 
 ---
 
@@ -424,7 +452,13 @@ The Gateway does not perform the authorisation check (approver list membership, 
 
 ## Key Vault Integration
 
-Write credentials are fetched just-in-time after approval, not at startup. Secret naming follows the existing namespace convention, with underscores in tool names replaced by hyphens (Key Vault secret names only permit alphanumeric characters and hyphens):
+**Deliberate exception to the startup-fetch rule:** CLAUDE.md mandates fetching Key Vault secrets at startup and caching them in module scope. Step-up auth write credentials are an approved exception: they are fetched just-in-time after approval, not at startup, and are not cached.
+
+**Rationale:** Caching write credentials at startup would place them in coordinator memory for the container's lifetime regardless of whether any approvals have been granted. Just-in-time fetch means the credential is only available for the duration of the approved invocation. Revoking the secret in Key Vault takes effect immediately without a container restart. This is the correct pattern for credentials that are gated by human approval.
+
+`CLAUDE.md` is updated to document this exception: write credentials for step-up tools are fetched just-in-time; all other secrets follow the startup-fetch rule.
+
+Secret naming (hyphens only — Key Vault names do not permit underscores):
 
 ```
 tenant-{tenant_id}-{tool-name}-write-credential
@@ -433,8 +467,6 @@ tenant-{tenant_id}-{tool-name}-write-credential
 Examples:
 - `tenant-acme-apply-change-write-credential`
 - `tenant-acme-rollback-change-write-credential`
-
-The coordinator does not cache these secrets in module scope. Each approved invocation performs a fresh Key Vault read. This ensures that revoking the secret in Key Vault takes effect immediately without a container restart.
 
 ---
 
@@ -504,11 +536,13 @@ All existing multi-tenancy rules apply. Additions:
 |---|---|---|
 | `services/coordinator/step_up.py` | New | `StepUpResult`, `prepare_step_up`, `resolve_step_up`, `get_active_grant`, `write_active_grant`, `create_step_up_request`, `await_step_up_decision`, `fetch_tool_credential`, `mark_step_up_failed`, `recover_expired_step_up_requests` |
 | `services/coordinator/notifications.py` | New | Out-of-band notification helper (email via ACS + webhook) |
-| `services/coordinator/agent_loop.py` | Modified | Pre-dispatch step-up check via `handle_step_up`; loop emits all SSE approval events |
-| `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve`, `POST /step-up/{id}/reject`; remove `POST /changes/{id}/apply`, `POST /changes/{id}/reject` |
+| `services/coordinator/agent_loop.py` | Modified | Inline step-up gate in `_stream_generator`; serial dispatch for gated tools; SSE keepalive heartbeat during poll |
+| `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve`, `POST /step-up/{id}/reject` with `StepUpDecisionRequest/Response` models; remove `POST /changes/{id}/apply`, `POST /changes/{id}/reject`; write `approved_by` to `change_records` on approval |
 | `services/gateway/main.py` | Modified | Add proxy routes `POST /step-up/{id}/approve` and `POST /step-up/{id}/reject` with standard auth middleware |
 | `infrastructure/terraform/modules/cosmos-db/main.tf` | Modified | Add `step_up_requests` container (partitioned by `tenant_id`) and `step_up_grants` container (partitioned by `tenant_id`, TTL enabled) |
-| `ARCHITECTURE.md` | Modified | Update: Coordinator endpoint list (Security Model), `step_up_requests` and `step_up_grants` containers (Data Model), new SSE events (SSE Streaming Design), step-up row in Multi-Tenancy table |
+| `infrastructure/terraform/modules/container-apps/main.tf` | Modified | Set ingress request timeout to `max(pending_ttl_seconds) + 60s` |
+| `ARCHITECTURE.md` | Modified | Update: Coordinator endpoint list, `step_up_requests` and `step_up_grants` containers (Cosmos DB section), new SSE events table, Multi-Tenancy table |
+| `CLAUDE.md` | Modified | Document just-in-time Key Vault fetch as approved exception for step-up write credentials; add `step_up_requests` and `step_up_grants` to Cosmos DB containers list |
 
 ---
 
