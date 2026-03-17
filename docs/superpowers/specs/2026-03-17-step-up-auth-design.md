@@ -107,7 +107,7 @@ pending → approved → (tool dispatched)
 
 ### `step_up_grants` — new Cosmos DB container
 
-Active time-window grants. Partitioned by `tenant_id`. Cosmos DB TTL set to `grant_duration_seconds` — documents auto-expire.
+Active time-window grants. Partitioned by `tenant_id`. The container must be created with `default_ttl = -1` in Terraform to enable per-document TTL. Each document then sets `_ttl` to `grant_duration_seconds` — Cosmos DB auto-deletes on expiry. Without `default_ttl = -1`, the `_ttl` field is silently ignored and grants never expire physically.
 
 **Grant scope: session-scoped.** A grant is tied to the `session_id` in which it was approved. A user who closes their browser and opens a new session does not inherit grants from previous sessions. This is intentional — the approval is tied to a specific conversation context, not the user identity indefinitely.
 
@@ -316,7 +316,8 @@ async def _stream_generator(request: ChatRequest, tenant_config: dict):
                          "approved_by": step_up_result.approved_by})
             credential = step_up_result.credential
         else:
-            credential = None  # active time-window grant — proceed silently
+            # Active time-window grant — still need the write credential; fetch it just-in-time
+            credential = await fetch_tool_credential(tool_name, request.tenant_id)
 
         agent_result = await _call_agent(tool_name, tool_input, request, credential=credential)
         # feed agent_result back to Claude ...
@@ -400,7 +401,13 @@ class StepUpErrorResponse(BaseModel):
 
 `StepUpDecisionResponse` is returned on 200. `StepUpErrorResponse` is returned on 403 and 409. All attempts — approved, rejected, and forbidden — are written to the audit log.
 
-**`approved_by` propagation to `change_records`:** When a step-up request for `apply_change` or `rollback_change` is approved, the approve endpoint handler writes `approved_by` and `approved_at` to the corresponding `change_records` document in Cosmos DB. This is a direct Cosmos DB write by the Coordinator using `(change_id, tenant_id)` as the partition key — consistent with the Coordinator's existing Cosmos DB access for these containers. The `change_id` is read from `step_up_requests.context.change_id`.
+**Decision recorded on `step_up_requests`:** Both the approve and reject handlers write the caller's identity and timestamp to the `step_up_requests` document before returning. This ensures `await_step_up_decision` can read a non-null `approved_by` for any terminal status:
+- `approved_by` — caller's identity from SAML claims
+- `approved_at` — current UTC timestamp
+
+`decided_by` will never be null in `approval_rejected` SSE events or the audit log.
+
+**`approved_by` propagation to `change_records`:** When a step-up request for `apply_change` or `rollback_change` is approved, the approve endpoint handler additionally writes `approved_by` and `approved_at` to the corresponding `change_records` document in Cosmos DB using `(change_id, tenant_id)` as the partition key. The `change_id` is read from `step_up_requests.context.change_id`.
 
 ---
 
@@ -539,7 +546,7 @@ All existing multi-tenancy rules apply. Additions:
 | `services/coordinator/agent_loop.py` | Modified | Inline step-up gate in `_stream_generator`; serial dispatch for gated tools; SSE keepalive heartbeat during poll |
 | `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve`, `POST /step-up/{id}/reject` with `StepUpDecisionRequest/Response` models; remove `POST /changes/{id}/apply`, `POST /changes/{id}/reject`; write `approved_by` to `change_records` on approval |
 | `services/gateway/main.py` | Modified | Add proxy routes `POST /step-up/{id}/approve` and `POST /step-up/{id}/reject` with standard auth middleware |
-| `infrastructure/terraform/modules/cosmos-db/main.tf` | Modified | Add `step_up_requests` container (partitioned by `tenant_id`) and `step_up_grants` container (partitioned by `tenant_id`, TTL enabled) |
+| `infrastructure/terraform/modules/cosmos-db/main.tf` | Modified | Add `step_up_requests` container (partitioned by `tenant_id`) and `step_up_grants` container (partitioned by `tenant_id`, `default_ttl = -1` required to enable per-document TTL) |
 | `infrastructure/terraform/modules/container-apps/main.tf` | Modified | Set ingress request timeout to `max(pending_ttl_seconds) + 60s` |
 | `ARCHITECTURE.md` | Modified | Update: Coordinator endpoint list, `step_up_requests` and `step_up_grants` containers (Cosmos DB section), new SSE events table, Multi-Tenancy table |
 | `CLAUDE.md` | Modified | Document just-in-time Key Vault fetch as approved exception for step-up write credentials; add `step_up_requests` and `step_up_grants` to Cosmos DB containers list |
