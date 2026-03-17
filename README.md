@@ -54,13 +54,17 @@ graph TB
 
     subgraph Specialists
         NA[Network Agent<br/>Netmiko · Cisco · Palo Alto]
+        CR[Change Reviewer<br/>Claude Sonnet 4.6]
         RA[RAG Agent<br/>Azure AI Search]
         IA[ITSM Agent<br/>Jira]
         EA[Enrichment Agent<br/>CVE · EoX · Shodan]
+        DA[Design Agent<br/>Claude Sonnet 4.6]
+        TA[Troubleshoot Agent<br/>Claude Sonnet 4.6]
+        PA[Probe Agent<br/>NET_ADMIN · NET_RAW]
     end
 
     subgraph Azure
-        COSMOS[(Cosmos DB<br/>Conversations · Audit · Config)]
+        COSMOS[(Cosmos DB<br/>Conversations · Audit · Config · Changes · Step-up)]
         SEARCH[(Azure AI Search<br/>Knowledge Base)]
         KV[(Key Vault<br/>Secrets)]
         FOUNDRY[Azure AI Foundry<br/>Claude Sonnet 4.6]
@@ -70,12 +74,15 @@ graph TB
     UI -->|SAML| ISE
     UI -->|SSE POST /chat/stream| GW
     GW --> CO
-    CO --> NA & RA & IA & EA
+    CO --> NA & CR & RA & IA & EA & DA & TA & PA
     NA -->|TACACS+| ISE
     CO <--> COSMOS
     CO <--> FOUNDRY
+    CR <--> FOUNDRY
+    DA <--> FOUNDRY
+    TA <--> FOUNDRY
     RA <--> SEARCH
-    CO & GW & NA & RA & IA & EA --> KV
+    NA & IA & EA & TA --> KV
 ```
 
 ### Component Summary
@@ -94,9 +101,12 @@ graph TB
 | RAG Agent | Container (FastAPI) | Azure AI Search knowledge base queries |
 | ITSM Agent | Container (FastAPI) | Jira ticket creation and querying |
 | Enrichment Agent | Container (FastAPI) | CVE, EoX lifecycle, Shodan lookups |
+| Design Agent | Container (FastAPI + Claude Sonnet 4.6) | Plans network topology changes, new VLANs, firewall rules — AI-generated designs with compliance checks against RAG knowledge base |
+| Troubleshoot Agent | Container (FastAPI + Claude Sonnet 4.6) | Diagnoses network issues — correlates device data, logs, CVE enrichment; generates root cause analysis; fetches vendor credentials JIT post step-up approval |
+| Agent Probe | Container (FastAPI + Netmiko, Dedicated-D4) | Low-level connectivity diagnostics — ping, traceroute, MTU/packet loss tests using raw socket capabilities (NET_ADMIN/NET_RAW); runs on dedicated workload profile |
 | Cosmos DB | Azure Native | Conversations, audit logs, tenant config, change records, step-up requests/grants — partitioned by `tenant_id` |
 | Azure AI Search | Azure Native | RAG knowledge base with tenant-filtered queries |
-| Azure Key Vault | Azure Native | Secrets — fetched at startup via Managed Identity; write credentials fetched just-in-time post step-up approval |
+| Azure Key Vault | Azure Native | Secrets — fetched at startup via Managed Identity; vendor write credentials fetched just-in-time post step-up approval |
 | Azure Communication Services | Azure Native | Out-of-band step-up approval email notifications |
 | Azure AI Foundry | Azure Native | Claude Sonnet 4.6 model hosting |
 
@@ -366,13 +376,17 @@ vigil-platform/
 ├── services/
 │   ├── gateway/                 ← FastAPI — auth, rate limiting, SSE proxy
 │   ├── coordinator/             ← FastAPI + Claude Sonnet 4.6 — orchestration, streaming
-│   ├── agent-network/           ← FastAPI + Netmiko — device interrogation
+│   ├── agent-network/           ← FastAPI + Netmiko — device interrogation and changes
+│   ├── agent-change-reviewer/   ← FastAPI + Claude Sonnet 4.6 — AI peer review of changes
 │   ├── agent-rag/               ← FastAPI — Azure AI Search RAG
 │   ├── agent-itsm/              ← FastAPI — Jira integration
 │   ├── agent-enrichment/        ← FastAPI — CVE, EoX, Shodan
+│   ├── agent-design/            ← FastAPI + Claude Sonnet 4.6 — network design planning
+│   ├── agent-troubleshoot/      ← FastAPI + Claude Sonnet 4.6 — diagnosis and root cause
+│   ├── agent-probe/             ← FastAPI — raw socket diagnostics (Dedicated-D4)
 │   └── ui/                      ← React + Vite — chat UI and admin
 ├── infrastructure/
-│   └── terraform/               ← Azure IaC — modules per resource type
+│   └── terraform/               ← Azure IaC — 8 modules (networking, monitoring, cosmos-db, key-vault, acr, ai-search, ai-foundry, container-apps)
 ├── .github/
 │   └── workflows/               ← GitHub Actions — path-filtered per service
 ├── identity/
@@ -402,11 +416,11 @@ uvicorn main:app --reload --port 8001
 docker build -t vigil-coordinator .
 docker run -p 8001:8000 --env-file .env vigil-coordinator
 
-# Terraform
+# Terraform (production only — no dev environment)
 cd infrastructure/terraform
 terraform init
-terraform plan -var-file=environments/dev.tfvars
-terraform apply -var-file=environments/dev.tfvars
+terraform plan -var-file=environments/prod.tfvars
+terraform apply -var-file=environments/prod.tfvars
 ```
 
 ### Required Environment Variables

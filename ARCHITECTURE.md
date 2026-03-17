@@ -34,7 +34,7 @@ VIGIL is a multi-tenant, AI-powered managed services platform. It exposes a conv
 | Identity | Active Directory DC, Cisco ISE, Cisco Duo | Azure VM, Azure VM, SaaS |
 | Client | React UI | Containerised |
 | Orchestration | Agent Gateway, Coordinator Agent | Containerised |
-| Specialist Agents | Network, RAG, ITSM, Enrichment | Containerised |
+| Specialist Agents | Network, Change Reviewer, RAG, ITSM, Enrichment, Design, Troubleshoot, Probe | Containerised |
 | AI | Azure AI Foundry (Claude Sonnet 4.6) | Azure Native |
 | Data | Cosmos DB, Azure AI Search, Key Vault | Azure Native |
 | Platform | Container Apps, Container Registry | Azure Native |
@@ -196,6 +196,37 @@ If a specialist agent fails, the coordinator returns partial results with a clea
   - Optionally query Shodan for external exposure data
   - Return structured enrichment data for audit findings
 - **Never called directly by users** — coordinator only
+
+### Design Agent
+- **Type:** Containerised (FastAPI + Claude Sonnet 4.6)
+- **Service:** `services/agent-design`
+- **Responsibilities:**
+  - Design network topology changes, new VLANs, firewall rule sets, and security segmentation
+  - Query RAG knowledge base to validate proposed designs against compliance policies and best practices
+  - Generate structured design outputs with risk assessment and implementation notes
+  - Update `change_records` with design documentation for subsequent review and apply phases
+- **Never called directly by users** — coordinator only
+
+### Troubleshoot Agent
+- **Type:** Containerised (FastAPI + Claude Sonnet 4.6)
+- **Service:** `services/agent-troubleshoot`
+- **Responsibilities:**
+  - Diagnose network issues by correlating device state, interface data, routing tables, and CVE/EoX enrichment
+  - Generate structured root cause analysis with confidence scoring
+  - Fetch per-tenant vendor API credentials from Key Vault just-in-time (post step-up approval) for vendor-specific diagnostic calls
+  - Create Jira tickets for confirmed incidents via ITSM Agent
+  - All probe invocations audited here — agent-probe has no Cosmos DB access
+- **Never called directly by users** — coordinator only
+
+### Agent Probe
+- **Type:** Containerised (FastAPI + Netmiko), **Dedicated-D4 workload profile**
+- **Service:** `services/agent-probe`
+- **Responsibilities:**
+  - Low-level connectivity diagnostics: ping, traceroute, MTU tests, packet loss measurements
+  - Requires `NET_ADMIN` and `NET_RAW` Linux capabilities — only available on Dedicated workload profiles
+  - No tenant awareness, no Cosmos DB access — stateless diagnostic execution only
+  - All audit logging for probe invocations handled by Troubleshoot Agent
+- **Never called directly by users** — coordinator only (via troubleshoot agent)
 
 ### React UI
 - **Type:** Containerised (React + Vite)
@@ -392,12 +423,17 @@ The Network Agent never authenticates directly to devices using stored credentia
 This means device access is governed, audited, and revocable from a single point — exactly as a human engineer's access would be.
 
 ### Service-to-service authentication
-All Azure services authenticate via Azure Managed Identity — no API keys or connection strings in environment variables or code. The Container Apps environment has system-assigned managed identity with RBAC roles scoped to:
-- Cosmos DB: Data Contributor
-- Azure AI Search: Search Index Data Contributor
-- Key Vault: Secrets User
-- Azure AI Foundry: Cognitive Services OpenAI User
-- Azure Container Registry: AcrPull
+All Azure services authenticate via Azure Managed Identity — no API keys or connection strings in environment variables or code. Each Container App has a system-assigned managed identity with RBAC roles scoped to minimum required access:
+
+| Role | Scope | Assigned to |
+|---|---|---|
+| Cosmos DB Built-in Data Contributor | Cosmos DB account | gateway, coordinator, agent-network, agent-rag, agent-itsm, agent-enrichment, agent-change-reviewer, agent-design, agent-troubleshoot |
+| Key Vault Secrets User | Key Vault | agent-network, agent-itsm, agent-enrichment, agent-troubleshoot |
+| Search Index Data Contributor | AI Search | agent-rag, agent-design |
+| Cognitive Services OpenAI User | AI Foundry | coordinator, agent-change-reviewer, agent-design, agent-troubleshoot |
+| AcrPull | ACR | all eleven Container Apps |
+
+Notes: agent-probe has no Cosmos DB role (no tenant awareness; all probe audit logging handled by agent-troubleshoot). coordinator has no Key Vault role (accesses Cosmos DB and AI Foundry via Managed Identity only — no vault secrets required).
 
 ### Origin protection
 Azure Container Apps origin is locked to Cloudflare IP ranges only. Direct access to the Azure URL is blocked. Cloudflare is the only legitimate ingress path.
@@ -481,7 +517,7 @@ On every merge to `main`, the ITSM Agent raises a Jira change ticket containing:
 Per-tenant daily and monthly token limits are enforced at the Agent Gateway before requests reach the Coordinator. Budget configuration is stored in Cosmos DB and editable via the admin UI.
 
 ### Azure Cost Management
-Budget alerts are configured at the resource group level (`rg-vigil-prod`). Alerts fire at 80% and 100% of monthly budget. Costs are tagged per tenant for client billing visibility.
+Budget alerts are configured at the resource group level (`rg-uks-vigil-01`). Alerts fire at 80% and 100% of monthly budget. Costs are tagged per tenant for client billing visibility.
 
 ### Model selection
 Claude Sonnet 4.6 is the default model. Haiku 4.5 is available as a lower-cost option for high-volume, simple queries. Model selection is configurable per tenant.
@@ -534,27 +570,32 @@ vigil-platform/
 │   │   │   └── ise_auth.py      ← ISE TACACS+ auth handler
 │   │   ├── requirements.txt
 │   │   └── Dockerfile
+│   ├── agent-change-reviewer/
 │   ├── agent-rag/
 │   ├── agent-itsm/
 │   ├── agent-enrichment/
+│   ├── agent-design/
+│   ├── agent-troubleshoot/
+│   ├── agent-probe/
 │   └── ui/
 ├── infrastructure/
 │   └── terraform/
-│       ├── main.tf
+│       ├── main.tf              ← module composition + all RBAC assignments
 │       ├── variables.tf
 │       ├── outputs.tf
 │       ├── backend.tf
+│       ├── providers.tf
 │       ├── modules/
-│       │   ├── container-apps/
-│       │   ├── cosmos-db/
-│       │   ├── ai-search/
-│       │   ├── key-vault/
-│       │   ├── active-directory/ ← Windows Server DC VM
-│       │   ├── cisco-ise/        ← ISE VM from Marketplace
-│       │   └── duo-proxy/        ← Duo Auth Proxy VM
+│       │   ├── networking/      ← hub/spoke VNets, subnets, NSGs, private DNS zones
+│       │   ├── monitoring/      ← Log Analytics, App Insights, cost alert
+│       │   ├── container-apps/  ← CAE, workload profiles, all 11 Container Apps
+│       │   ├── cosmos-db/       ← account, database, 6 containers
+│       │   ├── key-vault/       ← vault, RBAC model, private endpoint
+│       │   ├── acr/             ← Premium registry, private endpoint
+│       │   ├── ai-search/       ← search service, private endpoint
+│       │   └── ai-foundry/      ← account, Claude Sonnet 4.6 deployment, private endpoint
 │       └── environments/
-│           ├── dev.tfvars
-│           └── prod.tfvars
+│           └── prod.tfvars      ← production only (AD/ISE/Duo provisioned manually)
 ├── identity/
 │   ├── ise/
 │   │   ├── policies/            ← ISE policy export/docs
@@ -608,10 +649,15 @@ COSMOS_ENDPOINT              # Azure Cosmos DB endpoint
 
 ### Secrets (Azure Key Vault)
 ```
-jira-api-token          # Jira API token
-jira-base-url           # Jira instance URL
-shodan-api-key          # Shodan API key (optional)
-tenant-{id}-device-creds # Per-tenant device credentials (JSON)
+jira-api-token                      # agent-itsm
+jira-base-url                       # agent-itsm
+cisco-support-api-key               # agent-enrichment (Cisco EoX API)
+shodan-api-key                      # agent-enrichment (optional)
+ise-tacacs-key                      # agent-network (TACACS+ shared secret)
+tenant-{id}-palo-alto-api-key       # agent-troubleshoot — fetched JIT post step-up
+tenant-{id}-cisco-asa-token         # agent-troubleshoot — fetched JIT post step-up
+tenant-{id}-cisco-meraki-api-key    # agent-troubleshoot — fetched JIT post step-up
+tenant-{id}-fortinet-token          # agent-troubleshoot — fetched JIT post step-up
 ```
 
 ---
