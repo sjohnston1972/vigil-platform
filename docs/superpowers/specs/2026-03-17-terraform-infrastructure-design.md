@@ -78,6 +78,7 @@ Storage accounts and ACR (alphanumeric only): `<type><region><name><number>` e.g
 | `privatelink.vaultcore.azure.net` | Key Vault |
 | `privatelink.azurecr.io` | ACR |
 | `privatelink.search.windows.net` | AI Search |
+| `privatelink.cognitiveservices.azure.com` | AI Foundry |
 
 **Private endpoints** — one per PaaS service, all placed in `snet-uks-pe-01`, each wired to its corresponding private DNS zone. Public network access is disabled on each PaaS service after private endpoint creation.
 
@@ -119,7 +120,7 @@ All Container Apps:
 
 **Ingress timeout** — `ca-uks-coordinator-01` requires a 960-second HTTP ingress timeout (900s step-up pending TTL + 60s buffer). The `azurerm` Terraform provider does not expose this setting. It is set via `az containerapp ingress update` as a post-deploy step in the GitHub Actions `deploy-coordinator.yml` workflow. This is documented as a known provider gap — the Terraform module includes a comment noting it.
 
-**Agent-probe capabilities** — `NET_ADMIN` and `NET_RAW` Linux capabilities are set on `ca-uks-agent-probe-01` via the `capabilities` block in the container spec. These are only available on Dedicated workload profiles.
+**Agent-probe capabilities** — `NET_ADMIN` and `NET_RAW` Linux capabilities are required on `ca-uks-agent-probe-01`. These are only available on Dedicated workload profiles. See "Known Terraform Provider Gaps" — this setting is applied via a post-deploy `az containerapp update` step, not via Terraform.
 
 **Module inputs:** CAE subnet ID, Log Analytics workspace ID, ACR login server, Key Vault URL, Cosmos DB endpoint, AI Foundry endpoint, AI Search endpoint, App Insights connection string.
 
@@ -173,7 +174,9 @@ The `step_up_requests` and `step_up_grants` containers are already defined in th
 |---|---|
 | `jira-api-token` | `agent-itsm` |
 | `jira-base-url` | `agent-itsm` |
+| `cisco-support-api-key` | `agent-enrichment` (Cisco EoX API) |
 | `shodan-api-key` | `agent-enrichment` (optional) |
+| `ise-tacacs-key` | `agent-network` (TACACS+ shared secret) |
 | `tenant-{id}-palo-alto-api-key` | `agent-troubleshoot` JIT fetch |
 | `tenant-{id}-cisco-asa-token` | `agent-troubleshoot` JIT fetch |
 | `tenant-{id}-cisco-meraki-api-key` | `agent-troubleshoot` JIT fetch |
@@ -186,7 +189,7 @@ The `step_up_requests` and `step_up_grants` containers are already defined in th
 ### acr
 
 **Registry** — `acruksvigilprod01`
-- SKU: Basic
+- SKU: Premium (required for private endpoint support — Basic and Standard do not support private endpoints)
 - Location: UK South
 - Admin account: disabled — Container Apps pull via Managed Identity (`AcrPull`)
 - Public network access: disabled (private endpoint)
@@ -215,6 +218,7 @@ The `step_up_requests` and `step_up_grants` containers are already defined in th
 
 **Account** — `aif-uks-vigil-01`
 - Location: UK South
+- Public network access: disabled (private endpoint on `snet-uks-pe-01`, paired with `privatelink.cognitiveservices.azure.com` DNS zone)
 - **Note:** Verify Claude Sonnet 4.6 availability in UK South before applying. If unavailable, Sweden Central (`swedencentral`) is the recommended fallback. Model availability is not configurable — requires account in a supported region.
 
 **Model deployment** — `claude-sonnet-4-6`
@@ -239,7 +243,7 @@ The `step_up_requests` and `step_up_grants` containers are already defined in th
 **Cost Management budget alert** — scoped to `rg-uks-vigil-01`
 - Alert at 80% and 100% of monthly threshold
 - Threshold value set in `prod.tfvars`
-- Notification email set in `prod.tfvars`
+- Notification email set in `prod.tfvars` — **must be set before `terraform apply`**; a `variable` validation block enforces this (non-empty string)
 
 **Module outputs:** Log Analytics workspace ID, App Insights connection string.
 
@@ -253,11 +257,15 @@ Defined in root `main.tf`. All assignments use Managed Identity principal IDs ou
 
 | Role | Scope | Assigned to |
 |---|---|---|
-| `Cosmos DB Built-in Data Contributor` | Cosmos DB account | gateway, coordinator, agent-network, agent-itsm, agent-enrichment, agent-change-reviewer, agent-design, agent-troubleshoot |
-| `Key Vault Secrets User` | Key Vault | agent-itsm, agent-enrichment, agent-troubleshoot, coordinator |
+| `Cosmos DB Built-in Data Contributor` | Cosmos DB account | gateway, coordinator, agent-network, agent-rag, agent-itsm, agent-enrichment, agent-change-reviewer, agent-design, agent-troubleshoot |
+| `Key Vault Secrets User` | Key Vault | agent-network, agent-itsm, agent-enrichment, agent-troubleshoot |
 | `Search Index Data Contributor` | AI Search | agent-rag, agent-design |
 | `Cognitive Services OpenAI User` | AI Foundry | coordinator, agent-change-reviewer, agent-design, agent-troubleshoot |
 | `AcrPull` | ACR | all eleven Container Apps |
+
+Note: `agent-probe` has no Cosmos DB role — it has no tenant awareness and writes no audit entries. All auditing for probe invocations is handled by `agent-troubleshoot`.
+
+Note: `coordinator` has no Key Vault role — it accesses Cosmos DB and AI Foundry via Managed Identity (no Key Vault secrets needed). JIT write credentials for approved changes are fetched by `agent-network`, not the coordinator.
 
 **GitHub Actions service principal** — `sp-uks-github-vigil-01` (created via `azuread` provider):
 
@@ -322,7 +330,7 @@ acr_name                  = "acruksvigilprod01"
 ai_foundry_model_tpm      = 100000          # tokens per minute quota
 log_retention_days        = 30
 monthly_budget_gbp        = 500             # cost alert threshold
-budget_alert_email        = ""              # set before apply
+budget_alert_email        = "alerts@example.com"  # required — validated non-empty
 environment               = "prod"
 ```
 
@@ -350,6 +358,7 @@ A single `terraform apply` handles all of this. No manual ordering required.
 
 | Gap | Workaround |
 |---|---|
-| `azurerm` does not expose Container Apps ingress timeout | Set via `az containerapp ingress update` in `deploy-coordinator.yml` GitHub Actions workflow |
+| `azurerm` does not expose Container Apps ingress timeout | Set via `az containerapp ingress update --timeout 960` in `deploy-coordinator.yml` GitHub Actions post-deploy step |
+| `azurerm` does not expose `NET_ADMIN`/`NET_RAW` Linux capabilities on Container Apps | Set via `az containerapp update` with ARM properties override in `deploy-agent-probe.yml` post-deploy step |
 | `azurerm` does not manage Key Vault secrets (intentional) | Secrets created manually post-apply; documented in plan |
 | GitHub Actions secrets cannot be set via Terraform | Set manually after service principal creation |
