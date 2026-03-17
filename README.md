@@ -16,6 +16,7 @@ VIGIL exposes a conversational chat interface backed by a central coordinator ag
 |---|---|
 | Network auditing | SSH into Cisco/Palo Alto devices via ISE TACACS+, retrieve config, interfaces, routes, ACLs |
 | Network changes | Propose, AI peer review, human approve, apply, and rollback config/state changes — two-phase with full audit trail |
+| Step-up auth | Human-in-the-loop approval gates for high-risk tool calls — SSE-streamed, out-of-band email/webhook notifications, time-window grants |
 | Vulnerability enrichment | NVD CVE lookup, Cisco EoX lifecycle status, optional Shodan exposure check |
 | RAG knowledge base | Azure AI Search over compliance docs, best practices, and policy documents |
 | ITSM integration | Create and query Jira tickets from audit findings and every applied network change |
@@ -87,15 +88,16 @@ graph TB
 | Cisco Duo | SaaS + Auth Proxy VM | MFA — Universal Prompt, push/TOTP |
 | React UI | Container (Vite) | Chat interface, admin dashboard, audit log viewer |
 | Agent Gateway | Container (FastAPI) | Token validation, rate limiting, token budgets, SSE proxy |
-| Coordinator Agent | Container (FastAPI + Claude Sonnet 4.6) | Multi-agent orchestration, parallel execution, SSE streaming |
+| Coordinator Agent | Container (FastAPI + Claude Sonnet 4.6) | Multi-agent orchestration, parallel execution, SSE streaming, step-up approval gates |
 | Network Agent | Container (FastAPI + Netmiko) | SSH device interrogation and config/state changes via ISE TACACS+ |
 | Change Reviewer Agent | Container (FastAPI + Claude Sonnet 4.6) | AI peer review of proposed network changes — correctness, risk, alternatives |
 | RAG Agent | Container (FastAPI) | Azure AI Search knowledge base queries |
 | ITSM Agent | Container (FastAPI) | Jira ticket creation and querying |
 | Enrichment Agent | Container (FastAPI) | CVE, EoX lifecycle, Shodan lookups |
-| Cosmos DB | Azure Native | Conversations, audit logs, tenant config, change records — partitioned by `tenant_id` |
+| Cosmos DB | Azure Native | Conversations, audit logs, tenant config, change records, step-up requests/grants — partitioned by `tenant_id` |
 | Azure AI Search | Azure Native | RAG knowledge base with tenant-filtered queries |
-| Azure Key Vault | Azure Native | Secrets — fetched at startup via Managed Identity |
+| Azure Key Vault | Azure Native | Secrets — fetched at startup via Managed Identity; write credentials fetched just-in-time post step-up approval |
+| Azure Communication Services | Azure Native | Out-of-band step-up approval email notifications |
 | Azure AI Foundry | Azure Native | Claude Sonnet 4.6 model hosting |
 
 ---
@@ -200,6 +202,13 @@ stateDiagram-v2
     [*] --> session_start
     session_start --> agent_start : Claude invokes tools
     agent_start --> agent_start : parallel tools emit in succession
+    agent_start --> approval_required : step-up gated tool
+    approval_required --> approval_granted : approver approves
+    approval_required --> approval_rejected : approver rejects
+    approval_required --> approval_expired : TTL elapsed
+    approval_granted --> agent_start : tool dispatches
+    approval_rejected --> agent_start : coordinator continues
+    approval_expired --> agent_start : coordinator continues
     agent_start --> agent_complete : agent returns
     agent_start --> agent_error : agent fails
     agent_complete --> agent_start : Claude invokes more tools
@@ -218,6 +227,10 @@ stateDiagram-v2
 | `agent_start` | `agent`, `detail` | Agent about to execute (`detail` = device host or null) |
 | `agent_complete` | `agent`, `duration_ms` | Agent finished — fires as each completes, not batched |
 | `agent_error` | `agent`, `error` | Agent failed — coordinator continues with partial results |
+| `approval_required` | `request_id`, `tool`, `context`, `approver_type`, `expires_at` | Step-up gate — loop paused awaiting human approval; keepalive heartbeats sent every 30s |
+| `approval_granted` | `request_id`, `tool`, `approved_by` | Approval received, tool dispatching |
+| `approval_rejected` | `request_id`, `tool`, `decided_by` | Rejected — coordinator continues with partial results |
+| `approval_expired` | `request_id`, `tool` | Approval window elapsed without decision |
 | `token` | `content` | One token of Claude's final response |
 | `done` | `tokens_used`, `session_id` | Audit log written, stream complete |
 | `error` | `code`, `message` | Fatal: `budget_exceeded`, `rate_limited`, `coordinator_unavailable` |
@@ -233,6 +246,48 @@ agent_start (enrichment_agent) ─┘ immediate succession
 agent_complete (enrichment_agent, 890ms)  ← finished first
 agent_complete (network_agent, 1240ms)    ← finished second
 ```
+
+---
+
+## Step-Up Auth
+
+High-risk tool calls (`apply_change`, `rollback_change`) require human approval before the coordinator dispatches them. The approval loop runs entirely inside the SSE stream — the connection stays open with keepalive heartbeats while waiting.
+
+```mermaid
+sequenceDiagram
+    participant UI as React UI
+    participant GW as Agent Gateway
+    participant CO as Coordinator
+    participant NA as Network Agent
+    actor AP as Approver
+
+    UI->>CO: POST /chat/stream ("apply the change")
+    CO-->>UI: SSE: approval_required (request_id, expires_at)
+    CO->>AP: Email / webhook (approve_url, reject_url)
+
+    loop Every 30s while waiting
+        CO-->>UI: SSE: ": keepalive" (comment line)
+    end
+
+    AP->>GW: POST /step-up/{id}/approve
+    GW->>CO: POST /step-up/{id}/approve (X-Tenant-Id, X-User-Identity)
+    CO->>CO: Validate approver, write decision, fetch write credential
+
+    CO-->>UI: SSE: approval_granted (approved_by)
+    CO-->>UI: SSE: agent_start (apply_change)
+    CO->>NA: apply_change + write_credential
+    NA-->>CO: Result
+    CO-->>UI: SSE: agent_complete (apply_change)
+```
+
+### Approval policies (per tool, per tenant — in `tenant_config`)
+
+| Policy field | Effect |
+|---|---|
+| `self_approve: false` | Requester cannot approve their own request — designated approver required |
+| `self_approve: true` | Requester can approve (lower-risk tools) |
+| `pending_ttl_seconds` | How long the approval window stays open (default 900s) |
+| `grant_duration_seconds` | After approval, how long the grant stays active for repeat calls in the same session |
 
 ---
 
@@ -370,10 +425,15 @@ COORDINATOR_URL
 AZURE_FOUNDRY_ENDPOINT
 AZURE_FOUNDRY_MODEL
 COSMOS_ENDPOINT
+COSMOS_DATABASE
+KEY_VAULT_URL
 NETWORK_AGENT_URL
 RAG_AGENT_URL
 ITSM_AGENT_URL
 ENRICHMENT_AGENT_URL
+GATEWAY_EXTERNAL_URL        # base URL for step-up approve/reject links in notifications
+ACS_ENDPOINT                # Azure Communication Services endpoint (step-up emails)
+ACS_SENDER_ADDRESS          # noreply address for approval emails
 ```
 
 All Azure services authenticate via Managed Identity — no API keys required.
