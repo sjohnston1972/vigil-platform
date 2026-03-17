@@ -1,0 +1,46 @@
+name: Deploy Coordinator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/coordinator/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        run: |
+          docker build -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-coordinator:${{ github.sha }} services/coordinator/
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-coordinator:${{ github.sha }}
+
+      - name: Deploy to Container Apps
+        run: |
+          az containerapp update \
+            --name vigil-coordinator \
+            --resource-group rg-vigil-prod \
+            --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-coordinator:${{ github.sha }}
+
+      - name: Set ACA ingress timeout for step-up approval polls
+        run: |
+          az containerapp ingress update \
+            --name vigil-coordinator \
+            --resource-group rg-vigil-prod \
+            --timeout 960
+        # 960s = 900s max pending_ttl + 60s buffer.
+        # Must exceed the longest configured pending_ttl_seconds or SSE stream closes before approval.
