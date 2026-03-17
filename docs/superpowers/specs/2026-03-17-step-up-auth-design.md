@@ -197,8 +197,11 @@ Owns the full step-up lifecycle: policy lookup, request creation, polling, grant
 
 `_dispatch_tool_call` is a plain `async def` that returns the agent result or `None` (on rejection/expiry/failure). The calling loop in `agent_loop.py` emits all SSE events — `_dispatch_tool_call` never yields. `step_up.py` functions return typed `StepUpResult` objects that the loop inspects to decide which events to emit.
 
+`step_up.py` exposes two functions to the loop: `prepare_step_up` (creates the request, sends notifications, returns the request doc or None if an active grant was found) and `resolve_step_up` (polls for the decision, fetches the credential, writes the grant). This two-step split lets the loop emit `approval_required` SSE in between — after the request exists in Cosmos DB but before blocking on the poll.
+
 ```python
-# step_up.py — return type, not an SSE emitter
+# step_up.py
+
 @dataclass
 class StepUpResult:
     status: str           # "approved" | "rejected" | "expired" | "failed"
@@ -206,26 +209,40 @@ class StepUpResult:
     approved_by: str | None
     credential: str | None   # populated only on "approved"
 
-async def handle_step_up(
+async def prepare_step_up(
     tool_name: str,
     tool_input: dict,
     request: ChatRequest,
+    policy: dict,
     tenant_config: dict,
-) -> StepUpResult:
-    policy = tenant_config["step_up_policy"][tool_name]
-
+) -> dict | None:
+    """
+    Creates the step_up_requests record and dispatches notifications.
+    Returns the request document so the caller can emit approval_required SSE.
+    Returns None if an active time-window grant exists (no approval needed).
+    """
     if policy["grant_type"] == "time_window":
         grant = await get_active_grant(request.tenant_id, request.session_id, tool_name)
         if grant:
-            return StepUpResult(status="approved", request_id=grant["id"],
-                                approved_by=grant["approved_by"], credential=None)
+            return None  # active grant — caller proceeds directly
 
     step_up_req = await create_step_up_request(tool_name, tool_input, request, policy)
 
     if "email" in policy["notification_channels"] or "webhook" in policy["notification_channels"]:
         asyncio.ensure_future(notify_approvers(step_up_req, tenant_config))  # fire-and-forget
 
-    # caller emits approval_required SSE using step_up_req["id"], ["context"], ["expires_at"]
+    return step_up_req  # caller emits approval_required SSE, then calls resolve_step_up
+
+async def resolve_step_up(
+    step_up_req: dict,
+    request: ChatRequest,
+    policy: dict,
+) -> StepUpResult:
+    """
+    Polls for the approval decision, fetches the Key Vault credential on approval,
+    and writes the active grant for time_window tools.
+    Called after the loop has emitted approval_required SSE.
+    """
     decision = await await_step_up_decision(step_up_req["id"], request.tenant_id, policy)
 
     if decision["status"] in ("rejected", "expired"):
@@ -233,21 +250,22 @@ async def handle_step_up(
                             approved_by=decision.get("approved_by"), credential=None)
 
     try:
-        credential = await fetch_tool_credential(tool_name, request.tenant_id)
+        credential = await fetch_tool_credential(step_up_req["tool_name"], request.tenant_id)
     except Exception:
         await mark_step_up_failed(step_up_req["id"], request.tenant_id)
         return StepUpResult(status="failed", request_id=step_up_req["id"],
                             approved_by=decision["approved_by"], credential=None)
 
     if policy["grant_type"] == "time_window":
-        await write_active_grant(tool_name, decision["approved_by"], request, policy)
+        await write_active_grant(step_up_req["tool_name"], decision["approved_by"], request, policy)
 
     return StepUpResult(status="approved", request_id=step_up_req["id"],
                         approved_by=decision["approved_by"], credential=credential)
 ```
 
 ```python
-# agent_loop.py — loop emits all SSE events, calls step_up.handle_step_up()
+# agent_loop.py — loop emits all SSE events, calls prepare_step_up then resolve_step_up
+
 async def _dispatch_tool_call(
     tool_name: str,
     tool_input: dict,
@@ -261,41 +279,52 @@ async def _dispatch_tool_call(
         result = await _call_agent(tool_name, tool_input, request)
         return result, []
 
-    # Initiate step-up — result contains status and credential
-    step_up_req_preview = await preview_step_up_request(tool_name, tool_input, request, policy)
-    sse_events = [_sse({
-        "type": "approval_required",
-        "request_id": step_up_req_preview["id"],
-        "tool": tool_name,
-        "context": step_up_req_preview["context"],
-        "approver_type": "self" if policy["self_approve"] else "designated",
-        "expires_at": step_up_req_preview["expires_at"],
-    })]
+    sse_events: list[str] = []
 
-    result = await handle_step_up(tool_name, tool_input, request, tenant_config)
+    # Step 1: create request (or find active grant)
+    step_up_req = await prepare_step_up(tool_name, tool_input, request, policy, tenant_config)
 
-    if result.status == "rejected":
-        sse_events.append(_sse({"type": "approval_rejected", "request_id": result.request_id,
-                                "tool": tool_name, "decided_by": result.approved_by}))
-        return None, sse_events
+    if step_up_req is not None:
+        # New approval needed — emit approval_required before blocking on poll
+        sse_events.append(_sse({
+            "type": "approval_required",
+            "request_id": step_up_req["id"],
+            "tool": tool_name,
+            "context": step_up_req["context"],
+            "approver_type": "self" if policy["self_approve"] else "designated",
+            "expires_at": step_up_req["expires_at"],
+        }))
 
-    if result.status == "expired":
-        sse_events.append(_sse({"type": "approval_expired", "request_id": result.request_id,
-                                "tool": tool_name}))
-        return None, sse_events
+        # Step 2: block until decision
+        result = await resolve_step_up(step_up_req, request, policy)
 
-    if result.status == "failed":
-        sse_events.append(_sse({"type": "agent_error", "agent": tool_name,
-                                "error": "credential_fetch_failed"}))
-        return None, sse_events
+        if result.status == "rejected":
+            sse_events.append(_sse({"type": "approval_rejected", "request_id": result.request_id,
+                                    "tool": tool_name, "decided_by": result.approved_by}))
+            return None, sse_events
 
-    sse_events.append(_sse({"type": "approval_granted", "request_id": result.request_id,
-                             "tool": tool_name, "approved_by": result.approved_by}))
-    agent_result = await _call_agent(tool_name, tool_input, request, credential=result.credential)
+        if result.status == "expired":
+            sse_events.append(_sse({"type": "approval_expired",
+                                    "request_id": result.request_id, "tool": tool_name}))
+            return None, sse_events
+
+        if result.status == "failed":
+            sse_events.append(_sse({"type": "agent_error", "agent": tool_name,
+                                    "error": "credential_fetch_failed"}))
+            return None, sse_events
+
+        sse_events.append(_sse({"type": "approval_granted", "request_id": result.request_id,
+                                 "tool": tool_name, "approved_by": result.approved_by}))
+        credential = result.credential
+    else:
+        # Active time-window grant exists — proceed silently, no SSE events
+        credential = None
+
+    agent_result = await _call_agent(tool_name, tool_input, request, credential=credential)
     return agent_result, sse_events
 ```
 
-The calling generator in `agent_loop.py` iterates over the returned `sse_events` list and yields each one into the SSE stream before yielding agent progress events.
+The calling generator in `agent_loop.py` iterates over the returned `sse_events` list and yields each string into the SSE stream.
 
 ### Polling strategy
 
@@ -473,7 +502,7 @@ All existing multi-tenancy rules apply. Additions:
 
 | File | Type | Purpose |
 |---|---|---|
-| `services/coordinator/step_up.py` | New | `StepUpResult`, `handle_step_up`, `get_active_grant`, `write_active_grant`, `create_step_up_request`, `await_step_up_decision`, `fetch_tool_credential`, `recover_expired_step_up_requests` |
+| `services/coordinator/step_up.py` | New | `StepUpResult`, `prepare_step_up`, `resolve_step_up`, `get_active_grant`, `write_active_grant`, `create_step_up_request`, `await_step_up_decision`, `fetch_tool_credential`, `mark_step_up_failed`, `recover_expired_step_up_requests` |
 | `services/coordinator/notifications.py` | New | Out-of-band notification helper (email via ACS + webhook) |
 | `services/coordinator/agent_loop.py` | Modified | Pre-dispatch step-up check via `handle_step_up`; loop emits all SSE approval events |
 | `services/coordinator/main.py` | Modified | `POST /step-up/{id}/approve`, `POST /step-up/{id}/reject`; remove `POST /changes/{id}/apply`, `POST /changes/{id}/reject` |
