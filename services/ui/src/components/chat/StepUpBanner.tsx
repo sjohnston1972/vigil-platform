@@ -23,7 +23,7 @@ export function StepUpBanner({ tool, device, expiresAt, onApprove, onReject, onE
     const id = setInterval(() => {
       const secs = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000))
       setCountdown(formatCountdown(expiresAt))
-      if (secs === 0) {
+      if (secs <= 0) {
         clearInterval(id)
         onExpire?.()
       }
