@@ -33,7 +33,7 @@ export function useSessions() {
     })
     // Call real endpoint when coordinator is reachable
     try {
-      await fetch(`/sessions/${id}/title`, {
+      void fetch(`/sessions/${id}/title`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),

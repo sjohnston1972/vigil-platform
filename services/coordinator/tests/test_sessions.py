@@ -29,7 +29,7 @@ def test_patch_session_title():
     assert resp.json()["title"] == "New title"
 
 def test_patch_session_title_rejects_wrong_tenant():
-    mock_item = {"id": "sess_1", "tenant_id": "t2", "title": "Other tenant", "agents": []}
+    mock_item = {"id": "sess_1", "tenant_id": "t2", "title": "Other tenant", "agents": [], "updated_at": "2026-03-18T00:00:00Z"}
     with patch("main.conversations_container") as mock_container:
         mock_container.read_item.return_value = dict(mock_item)
         resp = make_client().patch("/sessions/sess_1/title", json={"title": "Hijack"}, headers={"X-Tenant-Id": "t1"})
