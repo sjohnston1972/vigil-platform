@@ -7,16 +7,16 @@ interface Props { entry: AuditEntry }
 export function ExpandableRow({ entry }: Props) {
   const [expanded, setExpanded] = useState(false)
 
-  const rowBase = `text-xs border-b border-vigil-border cursor-pointer transition-colors`
+  const borderClass = expanded ? 'border-b border-vigil-accent' : 'border-b border-vigil-border'
   const rowClass = entry.isStepUp
-    ? `${rowBase} bg-vigil-warn-row border-l-2 border-amber-500/40`
-    : `${rowBase} bg-vigil-card hover:bg-vigil-card/80`
+    ? `text-xs ${borderClass} border-l-2 border-amber-500/40 cursor-pointer transition-colors bg-vigil-warn-row`
+    : `text-xs ${borderClass} cursor-pointer transition-colors bg-vigil-card hover:bg-vigil-card/80`
 
   return (
     <>
       <tr
         data-testid="main-row"
-        className={`${rowClass} ${expanded ? 'border-vigil-accent' : ''}`}
+        className={rowClass}
         onClick={() => setExpanded(e => !e)}
       >
         <td className="px-3 py-2 text-vigil-muted">{entry.time}</td>

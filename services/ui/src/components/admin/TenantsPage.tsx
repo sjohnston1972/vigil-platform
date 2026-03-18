@@ -28,7 +28,7 @@ export function TenantsPage() {
                 {fmt(t.budgetUsed)} / {fmt(t.budgetLimit)}
               </td>
               <td className="py-2 px-3">
-                <button className="text-vigil-accent-text text-xs hover:underline">Edit</button>
+                <a href="#" onClick={e => e.preventDefault()} className="text-vigil-accent-text text-sm hover:underline">Edit</a>
               </td>
             </tr>
           ))}

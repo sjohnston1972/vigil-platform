@@ -7,8 +7,10 @@ export const tenantsFixture: Tenant[] = [
 ]
 
 export const budgetsFixture: Budget[] = [
-  { tenantId: 't1', tenantName: 'Acme Corp', dailyLimit: 100000, usedToday: 42180, resetsAt: '00:00 UTC' },
-  { tenantId: 't2', tenantName: 'Beta Corp', dailyLimit: 50000,  usedToday: 8200,  resetsAt: '00:00 UTC' },
+  { tenantId: 't1', tenantName: 'Acme Corp',    dailyLimit: 100000, usedToday: 42180, resetsAt: '00:00 UTC' },
+  { tenantId: 't2', tenantName: 'Beta Corp',    dailyLimit: 50000,  usedToday: 8200,  resetsAt: '00:00 UTC' },
+  { tenantId: 't4', tenantName: 'Delta LLC',    dailyLimit: 100000, usedToday: 85000, resetsAt: '00:00 UTC' },
+  { tenantId: 't5', tenantName: 'Epsilon GmbH', dailyLimit: 100000, usedToday: 96000, resetsAt: '00:00 UTC' },
 ]
 
 export const agentHealthFixture: AgentHealth[] = [

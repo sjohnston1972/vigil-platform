@@ -14,4 +14,25 @@ describe('FilterBar', () => {
     await userEvent.type(screen.getByPlaceholderText(/search/i), 'BGP')
     expect(onSearchChange).toHaveBeenCalled()
   })
+
+  it('calls onAgentChange with the selected agent value', async () => {
+    const onAgentChange = vi.fn()
+    render(
+      <FilterBar
+        onSearchChange={() => {}}
+        onAgentChange={onAgentChange}
+        onDateChange={() => {}}
+        agents={['network_agent', 'itsm_agent']}
+      />
+    )
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /filter by agent/i }), 'network_agent')
+    expect(onAgentChange).toHaveBeenCalledWith('network_agent')
+  })
+
+  it('calls onDateChange with the selected date range value', async () => {
+    const onDateChange = vi.fn()
+    render(<FilterBar onSearchChange={() => {}} onAgentChange={() => {}} onDateChange={onDateChange} agents={[]} />)
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /filter by date/i }), '7d')
+    expect(onDateChange).toHaveBeenCalledWith('7d')
+  })
 })
