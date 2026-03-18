@@ -2,18 +2,21 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { ChatPage } from '../../components/chat/ChatPage'
+import { TenantProvider } from '../../context/TenantContext'
 
 // Mock nanoid so new session IDs are deterministic
 vi.mock('nanoid', () => ({ nanoid: () => 'test-id-123' }))
 
 function renderChatPage(path = '/chat') {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/chat" element={<ChatPage />} />
-        <Route path="/chat/:sessionId" element={<ChatPage />} />
-      </Routes>
-    </MemoryRouter>
+    <TenantProvider>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>
+    </TenantProvider>
   )
 }
 

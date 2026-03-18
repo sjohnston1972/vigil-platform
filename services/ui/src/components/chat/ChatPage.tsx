@@ -1,18 +1,17 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useSessions } from '../../hooks/useSessions'
 import { useStream } from '../../hooks/useStream'
+import { useTenant } from '../../context/TenantContext'
 import { SessionList } from './SessionList'
 import { ChatWindow } from './ChatWindow'
 import { AgentPanel } from './AgentPanel'
 import { StepUpBanner } from './StepUpBanner'
 import { nanoid } from 'nanoid'
 
-// TODO: replace with real tenant context from JWT claims
-const TENANT_ID = 'acme-corp'
-
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
+  const { tenantId } = useTenant()
   const { sessions, createSession, renameSession } = useSessions()
   const { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, sendMessage, dismissApproval, addErrorMessage } = useStream()
 
@@ -24,13 +23,16 @@ export function ChatPage() {
 
   function handleSend(text: string) {
     if (!sessionId) return
-    sendMessage(text, sessionId, TENANT_ID)
+    sendMessage(text, sessionId, tenantId)
   }
 
   async function handleApprove() {
     if (!pendingApproval) return
     try {
-      const res = await fetch(`/step-up/${pendingApproval.requestId}/approve`, { method: 'POST' })
+      const res = await fetch(`/step-up/${pendingApproval.requestId}/approve`, {
+        method: 'POST',
+        headers: { 'X-Tenant-Id': tenantId },
+      })
       if (!res.ok) addErrorMessage(`⚠ Approval failed: ${res.status} ${res.statusText}`)
     } catch {
       addErrorMessage('⚠ Approval request failed — network error.')
@@ -40,7 +42,10 @@ export function ChatPage() {
   async function handleReject() {
     if (!pendingApproval) return
     try {
-      const res = await fetch(`/step-up/${pendingApproval.requestId}/reject`, { method: 'POST' })
+      const res = await fetch(`/step-up/${pendingApproval.requestId}/reject`, {
+        method: 'POST',
+        headers: { 'X-Tenant-Id': tenantId },
+      })
       if (!res.ok) addErrorMessage(`⚠ Rejection failed: ${res.status} ${res.statusText}`)
     } catch {
       addErrorMessage('⚠ Rejection request failed — network error.')
@@ -65,7 +70,7 @@ export function ChatPage() {
           activeId={sessionId}
           onRename={renameSession}
           onNew={handleNew}
-          tenantId={TENANT_ID}
+          tenantId={tenantId}
         />
         <ChatWindow
           messages={messages}

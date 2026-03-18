@@ -49,8 +49,10 @@ export function useSessions() {
       })
       if (!res.ok) return
       const data: Session[] = await res.json()
-      setSessions(data)
-      save(data)
+      if (data.length > 0) {
+        setSessions(data)
+        save(data)
+      }
     } catch {
       // Coordinator not available — localStorage is source of truth
     }

@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock, patch
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 
 def make_client():
@@ -39,13 +40,23 @@ def test_patch_session_title():
 
 
 def test_patch_session_title_rejects_wrong_tenant():
-    mock_item = {"id": "sess_1", "tenant_id": "t2", "title": "Other tenant", "agents": [], "updated_at": "2026-03-18T00:00:00Z"}
     with patch("main.conversations_container") as mock_container:
-        mock_container.read_item = AsyncMock(return_value=dict(mock_item))
+        mock_container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(404, "not found"))
         resp = make_client().patch("/sessions/sess_1/title", json={"title": "Hijack"}, headers={"X-Tenant-Id": "t1"})
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 def test_get_sessions_requires_tenant_header():
     resp = make_client().get("/sessions")
+    assert resp.status_code == 422
+
+
+def test_auth_me_returns_tenant_id():
+    resp = make_client().get("/auth/me", headers={"X-Tenant-Id": "acme-corp"})
+    assert resp.status_code == 200
+    assert resp.json()["tenant_id"] == "acme-corp"
+
+
+def test_auth_me_requires_tenant_header():
+    resp = make_client().get("/auth/me")
     assert resp.status_code == 422

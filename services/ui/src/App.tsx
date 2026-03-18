@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { lazy, Suspense } from 'react'
 import { Shell } from './components/shell/Shell'
+import { TenantProvider } from './context/TenantContext'
 
 const Dashboard       = lazy(() => import('./components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
 const ChatPage        = lazy(() => import('./components/chat/ChatPage').then(m => ({ default: m.ChatPage })))
@@ -12,6 +13,7 @@ const AgentHealthPage = lazy(() => import('./components/admin/AgentHealthPage').
 
 export default function App() {
   return (
+    <TenantProvider>
     <BrowserRouter>
       <Suspense fallback={<div className="text-vigil-muted p-4 font-mono">Loading...</div>}>
         <Routes>
@@ -31,5 +33,6 @@ export default function App() {
         </Routes>
       </Suspense>
     </BrowserRouter>
+    </TenantProvider>
   )
 }

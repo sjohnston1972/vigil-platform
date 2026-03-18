@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone
 
 from azure.cosmos.aio import CosmosClient
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -80,6 +81,10 @@ class SessionSummary(BaseModel):
 
 class RenameTitleRequest(BaseModel):
     title: str
+
+
+class AuthMeResponse(BaseModel):
+    tenant_id: str
 
 
 # ── Header extractors ──────────────────────────────────────────────────────────
@@ -194,6 +199,12 @@ def _check_authorisation(record: dict, tenant_config: dict, caller: str, action:
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
+@app.get("/auth/me", response_model=AuthMeResponse)
+async def auth_me(tenant_id: str = Depends(extract_tenant)):
+    """Return the authenticated tenant identity from the JWT header."""
+    return AuthMeResponse(tenant_id=tenant_id)
+
+
 @app.get("/sessions", response_model=list[SessionSummary])
 async def list_sessions(tenant_id: str = Depends(extract_tenant)):
     """List all conversation sessions for the tenant, newest first."""
@@ -213,10 +224,11 @@ async def rename_session(
     body: RenameTitleRequest,
     tenant_id: str = Depends(extract_tenant),
 ):
-    """Rename a session. Returns 403 if session belongs to a different tenant."""
-    record = await conversations_container.read_item(item=session_id, partition_key=tenant_id)
-    if record["tenant_id"] != tenant_id:
-        raise HTTPException(status_code=403, detail="unauthorized")
+    """Rename a session. Returns 404 if not found, 403 if wrong tenant."""
+    try:
+        record = await conversations_container.read_item(item=session_id, partition_key=tenant_id)
+    except CosmosResourceNotFoundError:
+        raise HTTPException(status_code=404, detail="session not found")
     record["title"] = body.title.strip()
     record["updated_at"] = datetime.now(timezone.utc).isoformat()
     await conversations_container.replace_item(item=session_id, body=record, partition_key=tenant_id)
