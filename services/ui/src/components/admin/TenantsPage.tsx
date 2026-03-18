@@ -12,7 +12,7 @@ export function TenantsPage() {
             <th className="text-left py-2 px-3 font-normal">Tenant</th>
             <th className="text-left py-2 px-3 font-normal">Status</th>
             <th className="text-left py-2 px-3 font-normal">Budget Used</th>
-            <th className="py-2 px-3 font-normal" />
+            <th className="py-2 px-3 font-normal text-left">Edit</th>
           </tr>
         </thead>
         <tbody>

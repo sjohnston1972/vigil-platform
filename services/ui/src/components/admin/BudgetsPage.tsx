@@ -5,7 +5,7 @@ function fmt(n: number) { return Math.round(n / 1000) + 'k' }
 function usageClass(used: number, limit: number) {
   const pct = used / limit
   if (pct >= 0.95) return 'text-red-500'
-  if (pct >= 0.80) return 'text-amber-500'
+  if (pct > 0.80) return 'text-amber-500'
   return 'text-vigil-body'
 }
 
@@ -19,8 +19,8 @@ export function BudgetsPage() {
             <th className="text-left py-2 px-3 font-normal">Tenant</th>
             <th className="text-left py-2 px-3 font-normal">Daily Limit</th>
             <th className="text-left py-2 px-3 font-normal">Used Today</th>
-            <th className="text-left py-2 px-3 font-normal">Resets</th>
-            <th className="py-2 px-3 font-normal" />
+            <th className="text-left py-2 px-3 font-normal">Reset</th>
+            <th className="py-2 px-3 font-normal text-left">Edit</th>
           </tr>
         </thead>
         <tbody>
