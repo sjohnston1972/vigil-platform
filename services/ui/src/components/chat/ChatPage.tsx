@@ -14,7 +14,7 @@ export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
   const { sessions, createSession, renameSession } = useSessions()
-  const { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, sendMessage } = useStream()
+  const { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, sendMessage, dismissApproval, addErrorMessage } = useStream()
 
   function handleNew() {
     const id = nanoid()
@@ -29,12 +29,22 @@ export function ChatPage() {
 
   async function handleApprove() {
     if (!pendingApproval) return
-    await fetch(`/step-up/${pendingApproval.requestId}/approve`, { method: 'POST' })
+    try {
+      const res = await fetch(`/step-up/${pendingApproval.requestId}/approve`, { method: 'POST' })
+      if (!res.ok) addErrorMessage(`⚠ Approval failed: ${res.status} ${res.statusText}`)
+    } catch {
+      addErrorMessage('⚠ Approval request failed — network error.')
+    }
   }
 
   async function handleReject() {
     if (!pendingApproval) return
-    await fetch(`/step-up/${pendingApproval.requestId}/reject`, { method: 'POST' })
+    try {
+      const res = await fetch(`/step-up/${pendingApproval.requestId}/reject`, { method: 'POST' })
+      if (!res.ok) addErrorMessage(`⚠ Rejection failed: ${res.status} ${res.statusText}`)
+    } catch {
+      addErrorMessage('⚠ Rejection request failed — network error.')
+    }
   }
 
   return (
@@ -46,7 +56,7 @@ export function ChatPage() {
           expiresAt={pendingApproval.expiresAt}
           onApprove={handleApprove}
           onReject={handleReject}
-          onExpire={handleReject}
+          onExpire={dismissApproval}
         />
       )}
       <div className="flex flex-1 overflow-hidden">

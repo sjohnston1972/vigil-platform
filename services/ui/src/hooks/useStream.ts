@@ -154,5 +154,13 @@ export function useStream() {
     startStream({ session_id: sessionId, tenant_id: tenantId, messages: updated })
   }, [startStream])
 
-  return { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, currentSessionId, startStream, sendMessage }
+  const dismissApproval = useCallback(() => {
+    setPendingApproval(null)
+  }, [])
+
+  const addErrorMessage = useCallback((text: string) => {
+    setMessages(prev => [...prev, { role: 'assistant', content: text }])
+  }, [])
+
+  return { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, currentSessionId, startStream, sendMessage, dismissApproval, addErrorMessage }
 }
