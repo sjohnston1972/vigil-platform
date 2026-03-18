@@ -22,7 +22,8 @@ describe('TenantsPage', () => {
 
   it('Gamma Ltd row has red dot and "Suspended" text', () => {
     render(<TenantsPage />)
-    const gammaStatus = screen.getByText(/Suspended/)
+    const gammaRow = screen.getByText('Gamma Ltd').closest('tr')!
+    const gammaStatus = within(gammaRow).getByText(/Suspended/)
     expect(gammaStatus).toBeInTheDocument()
     expect(gammaStatus).toHaveClass('text-red-500')
   })

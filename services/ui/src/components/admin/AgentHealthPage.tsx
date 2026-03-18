@@ -1,12 +1,13 @@
+import type { AgentHealth } from '../../types/index'
 import { agentHealthFixture } from '../../fixtures/admin'
 
-const STATUS_DOT: Record<string, string> = {
+const STATUS_DOT: Record<AgentHealth['status'], string> = {
   ok:    'text-green-500',
   stale: 'text-amber-500',
   down:  'text-red-500',
 }
 
-const ROW_CLASS: Record<string, string> = {
+const ROW_CLASS: Record<AgentHealth['status'], string> = {
   ok:    'bg-vigil-card',
   stale: 'bg-vigil-warn-row',
   down:  'bg-red-950/30',

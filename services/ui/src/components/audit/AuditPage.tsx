@@ -10,12 +10,13 @@ export function AuditPage() {
 
   const agents = useMemo(() => [...new Set(auditFixture.map(e => e.agent))], [])
 
+  // TODO: include date in deps when API filtering is wired
   const filtered = useMemo(() =>
     auditFixture.filter(e =>
       (!search || e.action.toLowerCase().includes(search.toLowerCase()) || e.agent.includes(search)) &&
       (!agent  || e.agent === agent) &&
       (!date   || true) // date filter placeholder — real filtering wired when API is available
-    ), [search, agent, date])
+    ), [search, agent]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex flex-col h-full">

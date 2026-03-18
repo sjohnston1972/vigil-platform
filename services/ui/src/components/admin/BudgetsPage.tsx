@@ -3,6 +3,7 @@ import { budgetsFixture } from '../../fixtures/admin'
 function fmt(n: number) { return Math.round(n / 1000) + 'k' }
 
 function usageClass(used: number, limit: number) {
+  if (limit <= 0) return 'text-vigil-body'
   const pct = used / limit
   if (pct >= 0.95) return 'text-red-500'
   if (pct > 0.80) return 'text-amber-500'

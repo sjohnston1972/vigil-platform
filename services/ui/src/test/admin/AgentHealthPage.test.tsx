@@ -4,10 +4,11 @@ import { AgentHealthPage } from '../../components/admin/AgentHealthPage'
 describe('AgentHealthPage', () => {
   it('renders column headers: Agent, Status, Last Heartbeat, p95 Response', () => {
     render(<AgentHealthPage />)
-    expect(screen.getByText('Agent')).toBeInTheDocument()
-    expect(screen.getByText('Status')).toBeInTheDocument()
-    expect(screen.getByText('Last Heartbeat')).toBeInTheDocument()
-    expect(screen.getByText('p95 Response')).toBeInTheDocument()
+    const headers = screen.getAllByRole('columnheader').map(h => h.textContent)
+    expect(headers).toContain('Agent')
+    expect(headers).toContain('Status')
+    expect(headers).toContain('Last Heartbeat')
+    expect(headers).toContain('p95 Response')
   })
 
   it('stale agent row has bg-vigil-warn-row class', () => {

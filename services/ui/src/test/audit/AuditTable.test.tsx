@@ -27,7 +27,8 @@ describe('AuditTable', () => {
       expect(screen.getByText(entry.time)).toBeInTheDocument()
     })
     // Verify the count matches the fixture length
-    const rows = screen.getAllByTestId('main-row')
-    expect(rows).toHaveLength(auditFixture.length)
+    const allRows = screen.getAllByRole('row')
+    // subtract the header row
+    expect(allRows.length - 1).toBe(auditFixture.length)
   })
 })

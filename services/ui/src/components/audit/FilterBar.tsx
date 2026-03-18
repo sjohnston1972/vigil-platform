@@ -10,6 +10,7 @@ export function FilterBar({ onSearchChange, onAgentChange, onDateChange, agents 
     <div className="flex gap-2 p-3 border-b border-vigil-border shrink-0">
       <input
         placeholder="Search logs..."
+        aria-label="Search audit logs"
         onChange={e => onSearchChange(e.target.value)}
         className="flex-1 bg-vigil-card border border-vigil-border rounded px-3 py-1.5 text-xs text-vigil-bright placeholder-vigil-muted outline-none focus:border-vigil-accent"
       />
