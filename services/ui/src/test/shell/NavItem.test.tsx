@@ -21,12 +21,12 @@ describe('NavItem', () => {
   it('has active class when route matches', () => {
     render(wrap('/dashboard', <NavItem to="/dashboard" label="Dashboard" icon="⊞" />))
     const item = screen.getByRole('link')
-    expect(item).toHaveClass('border-vigil-accent')
+    expect(item).toHaveAttribute('aria-current', 'page')
   })
 
   it('does not have active class on non-matching route', () => {
     render(wrap('/audit', <NavItem to="/dashboard" label="Dashboard" icon="⊞" />))
     const item = screen.getByRole('link')
-    expect(item).not.toHaveClass('border-vigil-accent')
+    expect(item).not.toHaveAttribute('aria-current')
   })
 })

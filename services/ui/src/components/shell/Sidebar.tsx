@@ -2,12 +2,16 @@ import { useLocation } from 'react-router-dom'
 import { NavItem } from './NavItem'
 import { SubNavItem } from './SubNavItem'
 
-interface Props {
-  tenantName: string
+interface TenantInfo {
+  name: string
   tokensToday: number
 }
 
-export function Sidebar({ tenantName, tokensToday }: Props) {
+interface Props {
+  tenant: TenantInfo
+}
+
+export function Sidebar({ tenant }: Props) {
   const { pathname } = useLocation()
   const adminActive = pathname.startsWith('/admin')
 
@@ -34,9 +38,9 @@ export function Sidebar({ tenantName, tokensToday }: Props) {
       </nav>
 
       <div className="border-t border-vigil-border px-4 py-3 mt-auto">
-        <p className="text-xs text-vigil-bright">{tenantName}</p>
+        <p className="text-xs text-vigil-body">{tenant.name}</p>
         <p className="text-xs text-vigil-muted mt-0.5">
-          {tokensToday.toLocaleString()} tokens today
+          {tenant.tokensToday.toLocaleString()} tokens today
         </p>
       </div>
     </aside>
