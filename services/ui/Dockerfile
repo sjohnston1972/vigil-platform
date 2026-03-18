@@ -17,4 +17,4 @@ RUN printf 'server {\n  listen 80;\n  root /usr/share/nginx/html;\n  location /h
 
 EXPOSE 80
 
-HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost/ || exit 1
+HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost/health || exit 1
