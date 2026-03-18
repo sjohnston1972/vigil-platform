@@ -1,0 +1,78 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
+import { useStream } from '../../hooks/useStream'
+
+function makeStream(lines: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream({
+    start(controller) {
+      for (const line of lines) controller.enqueue(encoder.encode(line + '\n\n'))
+      controller.close()
+    },
+  })
+}
+
+function mockFetch(events: object[]) {
+  const lines = events.map(e => `data: ${JSON.stringify(e)}`)
+  vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    body: makeStream(lines),
+  } as unknown as Response)
+}
+
+describe('useStream', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('accumulates token events into streamingContent', async () => {
+    mockFetch([
+      { type: 'session_start', session_id: 's1', tenant_id: 't1' },
+      { type: 'token', content: 'He' },
+      { type: 'token', content: 'llo' },
+      { type: 'done', tokens_used: 10, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    expect(result.current.streamingContent).toBe('Hello')
+  })
+
+  it('adds agent rows on agent_start', async () => {
+    mockFetch([
+      { type: 'agent_start', agent: 'network_agent', detail: '' },
+      { type: 'done', tokens_used: 0, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    const rows = result.current.agentGroups.flatMap(g => g.rows)
+    expect(rows.some(r => r.agent === 'network_agent' && r.status === 'running')).toBe(true)
+  })
+
+  it('updates agent row to complete on agent_complete', async () => {
+    mockFetch([
+      { type: 'agent_start', agent: 'rag_agent' },
+      { type: 'agent_complete', agent: 'rag_agent', duration_ms: 800 },
+      { type: 'done', tokens_used: 0, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    const rows = result.current.agentGroups.flatMap(g => g.rows)
+    expect(rows.some(r => r.agent === 'rag_agent' && r.status === 'complete')).toBe(true)
+  })
+
+  it('sets pendingApproval on approval_required', async () => {
+    mockFetch([
+      { type: 'approval_required', request_id: 'req1', tool: 'apply_change', device: 'r1', expires_at: new Date(Date.now() + 60000).toISOString() },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    expect(result.current.pendingApproval).not.toBeNull()
+    expect(result.current.pendingApproval?.tool).toBe('apply_change')
+  })
+})
