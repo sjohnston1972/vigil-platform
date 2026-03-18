@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StepUpBanner } from '../../components/chat/StepUpBanner'
 
@@ -32,5 +32,13 @@ describe('StepUpBanner', () => {
   it('shows expiry countdown', () => {
     render(<StepUpBanner {...props} />)
     expect(screen.getByText(/expires/i)).toBeInTheDocument()
+  })
+
+  it('calls onExpire when countdown reaches zero', async () => {
+    const onExpire = vi.fn()
+    const alreadyExpired = new Date(Date.now() - 1000).toISOString()
+    render(<StepUpBanner tool="apply_change" expiresAt={alreadyExpired} onApprove={() => {}} onReject={() => {}} onExpire={onExpire} />)
+    await act(async () => { await new Promise(r => setTimeout(r, 1100)) })
+    expect(onExpire).toHaveBeenCalledOnce()
   })
 })

@@ -6,6 +6,7 @@ interface Props {
   expiresAt: string
   onApprove: () => void
   onReject: () => void
+  onExpire?: () => void
 }
 
 function formatCountdown(expiresAt: string): string {
@@ -15,13 +16,20 @@ function formatCountdown(expiresAt: string): string {
   return `${m}:${s}`
 }
 
-export function StepUpBanner({ tool, device, expiresAt, onApprove, onReject }: Props) {
+export function StepUpBanner({ tool, device, expiresAt, onApprove, onReject, onExpire }: Props) {
   const [countdown, setCountdown] = useState(() => formatCountdown(expiresAt))
 
   useEffect(() => {
-    const id = setInterval(() => setCountdown(formatCountdown(expiresAt)), 1000)
+    const id = setInterval(() => {
+      const secs = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000))
+      setCountdown(formatCountdown(expiresAt))
+      if (secs === 0) {
+        clearInterval(id)
+        onExpire?.()
+      }
+    }, 1000)
     return () => clearInterval(id)
-  }, [expiresAt])
+  }, [expiresAt, onExpire])
 
   return (
     <div className="flex items-center justify-between px-4 py-2 border-b bg-vigil-stepup-bg border-vigil-stepup-border text-sm shrink-0">
