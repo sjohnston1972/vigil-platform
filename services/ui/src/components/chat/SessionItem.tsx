@@ -5,10 +5,12 @@ interface Props {
   session: Session
   isActive: boolean
   onSelect: (id: string) => void
-  onRename: (id: string, title: string) => void
+  onRename: (id: string, title: string, tenantId: string) => void
+  // TODO: replace with real tenant context from JWT claims
+  tenantId?: string
 }
 
-export function SessionItem({ session, isActive, onSelect, onRename }: Props) {
+export function SessionItem({ session, isActive, onSelect, onRename, tenantId = 'dev' }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(session.title)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -29,7 +31,7 @@ export function SessionItem({ session, isActive, onSelect, onRename }: Props) {
       return
     }
     const trimmed = draft.trim()
-    if (trimmed && trimmed !== session.title) onRename(session.id, trimmed)
+    if (trimmed && trimmed !== session.title) onRename(session.id, trimmed, tenantId)
     else setDraft(session.title)
     setEditing(false)
   }

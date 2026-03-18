@@ -65,6 +65,7 @@ export function ChatPage() {
           activeId={sessionId}
           onRename={renameSession}
           onNew={handleNew}
+          tenantId={TENANT_ID}
         />
         <ChatWindow
           messages={messages}

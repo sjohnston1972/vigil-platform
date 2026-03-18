@@ -40,7 +40,7 @@ describe('SessionItem', () => {
     const input = screen.getByRole('textbox')
     await userEvent.clear(input)
     await userEvent.type(input, 'New title{Enter}')
-    expect(onRename).toHaveBeenCalledWith('s1', 'New title')
+    expect(onRename).toHaveBeenCalledWith('s1', 'New title', 'dev')
   })
 
   it('calls onRename on blur', async () => {
@@ -51,7 +51,7 @@ describe('SessionItem', () => {
     await userEvent.clear(input)
     await userEvent.type(input, 'Blur title')
     await userEvent.tab()
-    expect(onRename).toHaveBeenCalledWith('s1', 'Blur title')
+    expect(onRename).toHaveBeenCalledWith('s1', 'Blur title', 'dev')
   })
 
   it('reverts title on Escape without calling onRename', async () => {

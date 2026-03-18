@@ -5,11 +5,12 @@ import { SessionItem } from './SessionItem'
 interface Props {
   sessions: Session[]
   activeId: string | undefined
-  onRename: (id: string, title: string) => void
+  onRename: (id: string, title: string, tenantId: string) => void
   onNew: () => void
+  tenantId?: string
 }
 
-export function SessionList({ sessions, activeId, onRename, onNew }: Props) {
+export function SessionList({ sessions, activeId, onRename, onNew, tenantId }: Props) {
   const navigate = useNavigate()
 
   return (
@@ -25,6 +26,7 @@ export function SessionList({ sessions, activeId, onRename, onNew }: Props) {
             isActive={s.id === activeId}
             onSelect={id => navigate(`/chat/${id}`)}
             onRename={onRename}
+            tenantId={tenantId}
           />
         ))}
       </div>

@@ -25,17 +25,16 @@ export function useSessions() {
     return s
   }, [])
 
-  const renameSession = useCallback(async (id: string, title: string) => {
+  const renameSession = useCallback((id: string, title: string, tenantId: string) => {
     setSessions(prev => {
       const next = prev.map(s => s.id === id ? { ...s, title } : s)
       save(next)
       return next
     })
-    // Call real endpoint when coordinator is reachable
     try {
       void fetch(`/sessions/${id}/title`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': tenantId },
         body: JSON.stringify({ title }),
       })
     } catch {
