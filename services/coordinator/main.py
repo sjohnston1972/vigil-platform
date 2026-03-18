@@ -18,16 +18,26 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 _cosmos_client = None
+conversations_container = None
 
 
 @app.on_event("startup")
 async def startup():
-    global _cosmos_client
+    global _cosmos_client, conversations_container
     credential = DefaultAzureCredential()
     _cosmos_client = CosmosClient(
         url=os.getenv("COSMOS_ENDPOINT"),
         credential=credential,
     )
+    from azure.cosmos import CosmosClient as SyncCosmosClient
+    from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+    _sync_credential = SyncDefaultAzureCredential()
+    _sync_cosmos = SyncCosmosClient(
+        url=os.getenv("COSMOS_ENDPOINT"),
+        credential=_sync_credential,
+    )
+    db = _sync_cosmos.get_database_client(os.getenv("COSMOS_DATABASE"))
+    conversations_container = db.get_container_client("conversations")
     from step_up import init_step_up_containers
     await init_step_up_containers(_cosmos_client, os.getenv("KEY_VAULT_URL", ""))
     asyncio.ensure_future(_run_recovery_loop())
@@ -65,6 +75,18 @@ class StepUpErrorResponse(BaseModel):
     error: str
     request_id: str
     detail: str | None = None
+
+
+class SessionSummary(BaseModel):
+    id: str
+    tenant_id: str
+    title: str
+    agents: list[str]
+    updated_at: str
+
+
+class RenameTitleRequest(BaseModel):
+    title: str
 
 
 # ── Header extractors ──────────────────────────────────────────────────────────
@@ -178,6 +200,32 @@ def _check_authorisation(record: dict, tenant_config: dict, caller: str, action:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.get("/sessions", response_model=list[SessionSummary])
+def list_sessions(tenant_id: str = Header(..., alias="X-Tenant-Id")):
+    """List all conversation sessions for the tenant, newest first."""
+    items = conversations_container.query_items(
+        query="SELECT c.id, c.tenant_id, c.title, c.agents, c.updated_at FROM c WHERE c.tenant_id = @tid ORDER BY c.updated_at DESC",
+        parameters=[{"name": "@tid", "value": tenant_id}],
+        partition_key=tenant_id,
+    )
+    return [SessionSummary(**i) for i in items]
+
+
+@app.patch("/sessions/{session_id}/title", response_model=SessionSummary)
+def rename_session(
+    session_id: str,
+    body: RenameTitleRequest,
+    tenant_id: str = Header(..., alias="X-Tenant-Id"),
+):
+    """Rename a session. Returns 403 if session belongs to a different tenant."""
+    record = conversations_container.read_item(item=session_id, partition_key=tenant_id)
+    if record["tenant_id"] != tenant_id:
+        raise HTTPException(status_code=403, detail="unauthorized")
+    record["title"] = body.title.strip()
+    conversations_container.replace_item(item=session_id, body=record, partition_key=tenant_id)
+    return SessionSummary(**record)
+
 
 @app.post("/step-up/{request_id}/approve", response_model=StepUpDecisionResponse)
 async def step_up_approve(

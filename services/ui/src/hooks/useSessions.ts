@@ -25,13 +25,22 @@ export function useSessions() {
     return s
   }, [])
 
-  const renameSession = useCallback((id: string, title: string) => {
-    // TODO: also PATCH /sessions/:id/title when coordinator endpoint exists
+  const renameSession = useCallback(async (id: string, title: string) => {
     setSessions(prev => {
       const next = prev.map(s => s.id === id ? { ...s, title } : s)
       save(next)
       return next
     })
+    // Call real endpoint when coordinator is reachable
+    try {
+      await fetch(`/sessions/${id}/title`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      })
+    } catch {
+      // Coordinator not available in local dev — localStorage is source of truth
+    }
   }, [])
 
   return { sessions, createSession, renameSession }
