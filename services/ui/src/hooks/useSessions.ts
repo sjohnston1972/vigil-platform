@@ -43,5 +43,19 @@ export function useSessions() {
     }
   }, [])
 
-  return { sessions, createSession, renameSession }
+  const loadSessions = useCallback(async (tenantId: string) => {
+    try {
+      const res = await fetch('/sessions', {
+        headers: { 'X-Tenant-Id': tenantId },
+      })
+      if (!res.ok) return
+      const data: Session[] = await res.json()
+      setSessions(data)
+      save(data)
+    } catch {
+      // Coordinator not available — localStorage is source of truth
+    }
+  }, [])
+
+  return { sessions, createSession, renameSession, loadSessions }
 }

@@ -29,14 +29,7 @@ async def startup():
         url=os.getenv("COSMOS_ENDPOINT"),
         credential=credential,
     )
-    from azure.cosmos import CosmosClient as SyncCosmosClient
-    from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
-    _sync_credential = SyncDefaultAzureCredential()
-    _sync_cosmos = SyncCosmosClient(
-        url=os.getenv("COSMOS_ENDPOINT"),
-        credential=_sync_credential,
-    )
-    db = _sync_cosmos.get_database_client(os.getenv("COSMOS_DATABASE"))
+    db = _cosmos_client.get_database_client(os.getenv("COSMOS_DATABASE"))
     conversations_container = db.get_container_client("conversations")
     from step_up import init_step_up_containers
     await init_step_up_containers(_cosmos_client, os.getenv("KEY_VAULT_URL", ""))
@@ -202,28 +195,31 @@ def _check_authorisation(record: dict, tenant_config: dict, caller: str, action:
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/sessions", response_model=list[SessionSummary])
-def list_sessions(tenant_id: str = Header(..., alias="X-Tenant-Id")):
+async def list_sessions(tenant_id: str = Depends(extract_tenant)):
     """List all conversation sessions for the tenant, newest first."""
-    items = conversations_container.query_items(
+    results = []
+    async for item in conversations_container.query_items(
         query="SELECT c.id, c.tenant_id, c.title, c.agents, c.updated_at FROM c WHERE c.tenant_id = @tid ORDER BY c.updated_at DESC",
         parameters=[{"name": "@tid", "value": tenant_id}],
         partition_key=tenant_id,
-    )
-    return [SessionSummary(**i) for i in items]
+    ):
+        results.append(SessionSummary(**item))
+    return results
 
 
 @app.patch("/sessions/{session_id}/title", response_model=SessionSummary)
-def rename_session(
+async def rename_session(
     session_id: str,
     body: RenameTitleRequest,
-    tenant_id: str = Header(..., alias="X-Tenant-Id"),
+    tenant_id: str = Depends(extract_tenant),
 ):
     """Rename a session. Returns 403 if session belongs to a different tenant."""
-    record = conversations_container.read_item(item=session_id, partition_key=tenant_id)
+    record = await conversations_container.read_item(item=session_id, partition_key=tenant_id)
     if record["tenant_id"] != tenant_id:
         raise HTTPException(status_code=403, detail="unauthorized")
     record["title"] = body.title.strip()
-    conversations_container.replace_item(item=session_id, body=record, partition_key=tenant_id)
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await conversations_container.replace_item(item=session_id, body=record, partition_key=tenant_id)
     return SessionSummary(**record)
 
 
