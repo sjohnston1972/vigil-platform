@@ -53,4 +53,26 @@ describe('SessionItem', () => {
     await userEvent.tab()
     expect(onRename).toHaveBeenCalledWith('s1', 'Blur title')
   })
+
+  it('reverts title on Escape without calling onRename', async () => {
+    const onRename = vi.fn()
+    render(<SessionItem session={session} isActive={false} onSelect={() => {}} onRename={onRename} />)
+    await userEvent.dblClick(screen.getByText('BGP audit — router-core-01'))
+    const input = screen.getByRole('textbox')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'Cancelled{Escape}')
+    expect(onRename).not.toHaveBeenCalled()
+    expect(screen.getByText('BGP audit — router-core-01')).toBeInTheDocument()
+  })
+
+  it('reverts to original title when cleared and blurred', async () => {
+    const onRename = vi.fn()
+    render(<SessionItem session={session} isActive={false} onSelect={() => {}} onRename={onRename} />)
+    await userEvent.dblClick(screen.getByText('BGP audit — router-core-01'))
+    const input = screen.getByRole('textbox')
+    await userEvent.clear(input)
+    await userEvent.tab()
+    expect(onRename).not.toHaveBeenCalled()
+    expect(screen.getByText('BGP audit — router-core-01')).toBeInTheDocument()
+  })
 })

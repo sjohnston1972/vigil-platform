@@ -12,12 +12,22 @@ export function SessionItem({ session, isActive, onSelect, onRename }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(session.title)
   const inputRef = useRef<HTMLInputElement>(null)
+  const cancellingRef = useRef(false)
 
   useEffect(() => {
     if (editing) inputRef.current?.select()
   }, [editing])
 
+  useEffect(() => {
+    if (!editing) setDraft(session.title)
+  }, [session.title, editing])
+
   function commit() {
+    if (!editing) return
+    if (cancellingRef.current) {
+      cancellingRef.current = false
+      return
+    }
     const trimmed = draft.trim()
     if (trimmed && trimmed !== session.title) onRename(session.id, trimmed)
     else setDraft(session.title)
@@ -37,11 +47,16 @@ export function SessionItem({ session, isActive, onSelect, onRename }: Props) {
       {editing ? (
         <input
           ref={inputRef}
+          aria-label="Rename session"
           className="w-full bg-vigil-border text-vigil-bright text-xs px-1 rounded outline-none"
           value={draft}
           onChange={e => setDraft(e.target.value)}
+          onClick={e => e.stopPropagation()}
           onBlur={commit}
-          onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setDraft(session.title); setEditing(false) } }}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.currentTarget.blur() }
+            if (e.key === 'Escape') { cancellingRef.current = true; setDraft(session.title); setEditing(false); e.currentTarget.blur() }
+          }}
         />
       ) : (
         <p

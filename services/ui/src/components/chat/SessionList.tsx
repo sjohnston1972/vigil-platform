@@ -31,9 +31,10 @@ export function SessionList({ sessions, activeId, onRename, onNew }: Props) {
       <div className="p-2 border-t border-vigil-border">
         <button
           onClick={onNew}
+          aria-label="New chat"
           className="w-full border border-dashed border-vigil-border text-vigil-muted text-xs py-1.5 rounded hover:text-vigil-body hover:border-vigil-body transition-colors"
         >
-          ＋ New chat
+          + New chat
         </button>
       </div>
     </div>
