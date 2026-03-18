@@ -2,7 +2,7 @@ import { Outlet } from 'react-router-dom'
 
 export function AdminLayout() {
   return (
-    <div className="p-4 text-vigil-body font-mono">
+    <div className="h-full overflow-y-auto p-6">
       <Outlet />
     </div>
   )
