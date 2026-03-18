@@ -20,8 +20,9 @@ export function ChatWindow({ messages, streamingContent, isStreaming, onSend, di
 
   function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter' && !e.shiftKey && !isStreaming) {
-      const text = inputRef.current?.value.trim()
-      if (text) { onSend(text); inputRef.current!.value = '' }
+      const input = inputRef.current
+      const text = input?.value.trim()
+      if (input && text) { onSend(text); input.value = '' }
     }
   }
 
