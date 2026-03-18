@@ -1,0 +1,37 @@
+name: Deploy UI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/ui/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        run: |
+          docker build -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-ui:${{ github.sha }} services/ui/
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-ui:${{ github.sha }}
+
+      - name: Deploy to Container Apps
+        run: |
+          az containerapp update \
+            --name vigil-ui \
+            --resource-group rg-vigil-prod \
+            --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/vigil-ui:${{ github.sha }}
