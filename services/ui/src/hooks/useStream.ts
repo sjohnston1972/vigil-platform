@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import type { SSEEvent } from '../types/sse'
 import type { Message, MessageAgentGroup, AgentRow } from '../types'
 
@@ -22,13 +22,19 @@ export function useStream() {
   const [pendingApproval,  setPendingApproval]  = useState<PendingApproval | null>(null)
   const [totalTokens,      setTotalTokens]      = useState(0)
   const [isStreaming,      setIsStreaming]       = useState(false)
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+
+  // Ref so startStream can read the current messages without them being a dependency
+  const messagesRef = useRef<Message[]>([])
+
+  useEffect(() => { messagesRef.current = messages }, [messages])
 
   const startStream = useCallback(async (request: ChatRequest) => {
     setIsStreaming(true)
     setStreamingContent('')
 
     // Track which message index we're on (increments each time a user message is sent)
-    const messageIdx = messages.filter(m => m.role === 'user').length + 1
+    const messageIdx = messagesRef.current.filter(m => m.role === 'user').length + 1
 
     let buffer = ''
     let accumulated = ''
@@ -40,7 +46,18 @@ export function useStream() {
         body: JSON.stringify(request),
       })
 
-      const reader = response.body!.getReader()
+      if (!response.ok) {
+        setMessages(prev => [...prev, { role: 'assistant', content: `⚠ Gateway error: ${response.status} ${response.statusText}` }])
+        setIsStreaming(false)
+        return
+      }
+      if (!response.body) {
+        setMessages(prev => [...prev, { role: 'assistant', content: '⚠ No response body received.' }])
+        setIsStreaming(false)
+        return
+      }
+
+      const reader = response.body.getReader()
       const decoder = new TextDecoder()
 
       while (true) {
@@ -57,6 +74,10 @@ export function useStream() {
           catch { continue }
 
           switch (event.type) {
+            case 'session_start':
+              setCurrentSessionId(event.session_id)
+              break
+
             case 'token':
               accumulated += event.content
               setStreamingContent(accumulated)
@@ -123,16 +144,15 @@ export function useStream() {
       setMessages(prev => [...prev, { role: 'assistant', content: '⚠ Connection error.' }])
       setIsStreaming(false)
     }
-  }, [messages])
+  }, [])
 
   const sendMessage = useCallback((text: string, sessionId: string, tenantId: string) => {
     const userMsg: Message = { role: 'user', content: text }
-    setMessages(prev => {
-      const updated = [...prev, userMsg]
-      startStream({ session_id: sessionId, tenant_id: tenantId, messages: updated })
-      return updated
-    })
+    const updated = [...messagesRef.current, userMsg]
+    messagesRef.current = updated
+    setMessages(updated)
+    startStream({ session_id: sessionId, tenant_id: tenantId, messages: updated })
   }, [startStream])
 
-  return { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, startStream, sendMessage }
+  return { messages, streamingContent, agentGroups, pendingApproval, totalTokens, isStreaming, currentSessionId, startStream, sendMessage }
 }

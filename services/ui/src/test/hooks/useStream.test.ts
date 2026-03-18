@@ -75,4 +75,29 @@ describe('useStream', () => {
     expect(result.current.pendingApproval).not.toBeNull()
     expect(result.current.pendingApproval?.tool).toBe('apply_change')
   })
+
+  it('exposes sessionId from session_start event', async () => {
+    mockFetch([
+      { type: 'session_start', session_id: 'new-session', tenant_id: 't1' },
+      { type: 'done', tokens_used: 0, session_id: 'new-session' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 'new-session', tenant_id: 't1', messages: [] })
+    })
+    expect(result.current.currentSessionId).toBe('new-session')
+  })
+
+  it('shows error message on non-ok HTTP response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+    } as unknown as Response)
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    expect(result.current.messages.some(m => m.content.includes('503'))).toBe(true)
+  })
 })
