@@ -15,7 +15,7 @@ export function StatTile({ label, value, valueClass, glowAmber, formatK }: Props
       }`}
     >
       <div className={`text-3xl font-bold ${valueClass}`}>{display}</div>
-      <div className="text-xs text-vigil-muted uppercase tracking-widest mt-1">{label.toUpperCase()}</div>
+      <div className="text-xs text-vigil-muted uppercase tracking-widest mt-1">{label}</div>
     </div>
   )
 }

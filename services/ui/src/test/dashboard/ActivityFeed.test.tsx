@@ -3,8 +3,8 @@ import { ActivityFeed } from '../../components/dashboard/ActivityFeed'
 import type { ActivityEntry } from '../../types'
 
 const entries: ActivityEntry[] = [
-  { icon: '✅', description: 'BGP audit — 10.0.0.1', timestamp: '2m ago' },
-  { icon: '⏳', description: 'Step-up pending', timestamp: '5m ago', isStepUp: true },
+  { id: 'a1', icon: '✅', description: 'BGP audit — 10.0.0.1', timestamp: '2m ago' },
+  { id: 'a2', icon: '⏳', description: 'Step-up pending', timestamp: '5m ago', isStepUp: true },
 ]
 
 describe('ActivityFeed', () => {

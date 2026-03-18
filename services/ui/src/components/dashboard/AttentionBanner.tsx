@@ -12,10 +12,7 @@ export function AttentionBanner({ pendingApprovals, failures, onReview }: Props)
   if (failures > 0) parts.push(`${failures} failure${failures > 1 ? 's' : ''}`)
 
   return (
-    <div
-      className="flex items-center justify-between px-4 py-2 rounded border text-amber-300 text-sm"
-      style={{ background: '#1a1200', borderColor: '#f59e0b66' }}
-    >
+    <div className="flex items-center justify-between px-4 py-2 rounded border border-vigil-stepup-border bg-vigil-stepup-bg text-amber-300 text-sm">
       <span>⚠ {parts.join(' · ')}</span>
       <button
         onClick={onReview}

@@ -5,7 +5,7 @@ describe('StatTile', () => {
   it('renders value and label', () => {
     render(<StatTile label="Active" value={3} valueClass="text-green-500" />)
     expect(screen.getByText('3')).toBeInTheDocument()
-    expect(screen.getByText('ACTIVE')).toBeInTheDocument()
+    expect(screen.getByText('Active')).toBeInTheDocument()
   })
 
   it('applies valueClass to the value element', () => {

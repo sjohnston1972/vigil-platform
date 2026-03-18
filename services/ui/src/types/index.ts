@@ -11,6 +11,7 @@ export interface Message {
 }
 
 export interface ActivityEntry {
+  id: string
   icon: string
   description: string
   timestamp: string    // relative e.g. "2m ago"

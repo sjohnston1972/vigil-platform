@@ -9,9 +9,9 @@ export function ActivityFeed({ entries }: Props) {
         Recent Activity
       </div>
       <div className="flex flex-col gap-1.5">
-        {entries.map((e, i) => (
+        {entries.map((e) => (
           <div
-            key={i}
+            key={e.id}
             data-testid="activity-row"
             className={`flex items-center gap-2 text-sm ${e.isStepUp ? 'text-amber-400' : 'text-vigil-body'}`}
           >
