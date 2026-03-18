@@ -49,4 +49,21 @@ describe('AgentPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /collapse/i }))
     expect(screen.queryByText('network_agent')).not.toBeInTheDocument()
   })
+
+  it('collapses a message group when its header is clicked', async () => {
+    render(<AgentPanel groups={groups} totalTokens={0} />)
+    await userEvent.click(screen.getByRole('button', { name: /expand/i }))
+    // Groups start open — click the group header to collapse it
+    await userEvent.click(screen.getByRole('button', { name: /toggle message 1/i }))
+    expect(screen.queryByText('network_agent')).not.toBeInTheDocument()
+  })
+
+  it('shows red dot for error agents', async () => {
+    const errorGroups: MessageAgentGroup[] = [
+      { messageIndex: 1, rows: [{ agent: 'itsm_agent', status: 'error' }] },
+    ]
+    render(<AgentPanel groups={errorGroups} totalTokens={0} />)
+    await userEvent.click(screen.getByRole('button', { name: /expand/i }))
+    expect(screen.getByTestId('dot-itsm_agent')).toHaveClass('bg-red-500')
+  })
 })

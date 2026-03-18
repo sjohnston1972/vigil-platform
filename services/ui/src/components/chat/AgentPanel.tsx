@@ -14,8 +14,16 @@ interface Props {
 
 export function AgentPanel({ groups, totalTokens }: Props) {
   const [expanded, setExpanded] = useState(false)
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<number>>(new Set())
 
-  const allDots = groups.flatMap(g => g.rows).map(r => r.status)
+  function toggleGroup(idx: number) {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
+  }
 
   if (!expanded) {
     return (
@@ -27,8 +35,12 @@ export function AgentPanel({ groups, totalTokens }: Props) {
           AGENTS
         </span>
         <div className="flex flex-col gap-1.5 mt-2">
-          {allDots.map((s, i) => (
-            <div key={i} className={`w-2 h-2 rounded-full ${DOT_CLASS[s]}`} />
+          {groups.flatMap(g => g.rows).map(r => (
+            <div
+              key={r.agent}
+              data-testid={`collapsed-dot-${r.agent}`}
+              className={`w-2 h-2 rounded-full ${DOT_CLASS[r.status] ?? 'bg-slate-500'}`}
+            />
           ))}
         </div>
         <button
@@ -56,25 +68,34 @@ export function AgentPanel({ groups, totalTokens }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto flex flex-col gap-3">
-        {groups.map(g => (
-          <div key={g.messageIndex}>
-            <div className="text-[10px] text-vigil-body mb-1">▾ Message {g.messageIndex}</div>
-            {g.rows.map(r => (
-              <div key={r.agent} className="flex items-center gap-1.5 pl-2 py-0.5">
-                <div
-                  data-testid={`dot-${r.agent}`}
-                  className={`w-2 h-2 rounded-full shrink-0 ${DOT_CLASS[r.status]}`}
-                />
-                <span className="text-[10px] text-vigil-body truncate flex-1">{r.agent}</span>
-                {r.durationMs && (
-                  <span className="text-[9px] text-vigil-muted">
-                    {(r.durationMs / 1000).toFixed(1)}s
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        ))}
+        {groups.map(g => {
+          const isOpen = !collapsedGroups.has(g.messageIndex)
+          return (
+            <div key={g.messageIndex}>
+              <button
+                onClick={() => toggleGroup(g.messageIndex)}
+                className="text-[10px] text-vigil-body mb-1 w-full text-left hover:text-vigil-bright"
+                aria-label={`toggle message ${g.messageIndex}`}
+              >
+                {isOpen ? '▾' : '▸'} Message {g.messageIndex}
+              </button>
+              {isOpen && g.rows.map(r => (
+                <div key={r.agent} className="flex items-center gap-1.5 pl-2 py-0.5">
+                  <div
+                    data-testid={`dot-${r.agent}`}
+                    className={`w-2 h-2 rounded-full shrink-0 ${DOT_CLASS[r.status] ?? 'bg-slate-500'}`}
+                  />
+                  <span className="text-[10px] text-vigil-body truncate flex-1">{r.agent}</span>
+                  {r.durationMs && (
+                    <span className="text-[9px] text-vigil-muted">
+                      {(r.durationMs / 1000).toFixed(1)}s
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )
+        })}
       </div>
 
       {totalTokens > 0 && (
