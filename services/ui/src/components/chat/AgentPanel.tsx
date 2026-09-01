@@ -86,7 +86,7 @@ export function AgentPanel({ groups, totalTokens }: Props) {
                     className={`w-2 h-2 rounded-full shrink-0 ${DOT_CLASS[r.status] ?? 'bg-slate-500'}`}
                   />
                   <span className="text-[10px] text-vigil-body truncate flex-1">{r.agent}</span>
-                  {r.durationMs && (
+                  {r.durationMs != null && (
                     <span className="text-[9px] text-vigil-muted">
                       {(r.durationMs / 1000).toFixed(1)}s
                     </span>

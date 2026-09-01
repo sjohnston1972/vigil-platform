@@ -47,8 +47,10 @@ export function useStream() {
     setIsStreaming(true)
     setStreamingContent('')
 
-    // Track which message index we're on (increments each time a user message is sent)
-    const messageIdx = messagesRef.current.filter(m => m.role === 'user').length + 1
+    // Track which message index we're on. sendMessage() already appends the user
+    // message (and syncs messagesRef) before calling startStream, so the current
+    // user-message count IS the 1-based index of this turn — no +1 needed.
+    const messageIdx = messagesRef.current.filter(m => m.role === 'user').length
 
     let buffer = ''
     let accumulated = ''
