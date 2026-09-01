@@ -82,9 +82,16 @@ describe('useStream', () => {
     expect(rows.some(r => r.agent === 'rag_agent' && r.status === 'complete')).toBe(true)
   })
 
-  it('sets pendingApproval on approval_required', async () => {
+  it('sets pendingApproval on approval_required, mapping context and approver_type', async () => {
     mockFetch([
-      { type: 'approval_required', request_id: 'req1', tool: 'apply_change', device: 'r1', expires_at: new Date(Date.now() + 60000).toISOString() },
+      {
+        type: 'approval_required',
+        request_id: 'req1',
+        tool: 'apply_change',
+        context: { device_host: 'r1', change_id: 'chg-42' },
+        approver_type: 'designated',
+        expires_at: new Date(Date.now() + 60000).toISOString(),
+      },
     ])
     const { result } = renderHook(() => useStream())
     await act(async () => {
@@ -92,6 +99,8 @@ describe('useStream', () => {
     })
     expect(result.current.pendingApproval).not.toBeNull()
     expect(result.current.pendingApproval?.tool).toBe('apply_change')
+    expect(result.current.pendingApproval?.context).toEqual({ device_host: 'r1', change_id: 'chg-42' })
+    expect(result.current.pendingApproval?.approverType).toBe('designated')
   })
 
   it('exposes sessionId from session_start event', async () => {

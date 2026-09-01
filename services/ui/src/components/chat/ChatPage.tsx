@@ -57,7 +57,6 @@ export function ChatPage() {
       {pendingApproval && (
         <StepUpBanner
           tool={pendingApproval.tool}
-          device={pendingApproval.device}
           expiresAt={pendingApproval.expiresAt}
           onApprove={handleApprove}
           onReject={handleReject}

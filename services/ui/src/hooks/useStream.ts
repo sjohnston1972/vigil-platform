@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import type { SSEEvent } from '../types/sse'
+import type { SSEEvent, StepUpContext } from '../types/sse'
 import type { Message, MessageAgentGroup, AgentRow } from '../types'
 
 interface ChatRequest {
@@ -11,7 +11,8 @@ interface ChatRequest {
 interface PendingApproval {
   requestId: string
   tool: string
-  device?: string
+  context: StepUpContext
+  approverType: 'self' | 'designated'
   expiresAt: string
 }
 
@@ -109,7 +110,13 @@ export function useStream() {
               break
 
             case 'approval_required':
-              setPendingApproval({ requestId: event.request_id, tool: event.tool, device: event.device, expiresAt: event.expires_at })
+              setPendingApproval({
+                requestId: event.request_id,
+                tool: event.tool,
+                context: event.context,
+                approverType: event.approver_type,
+                expiresAt: event.expires_at,
+              })
               break
 
             case 'approval_granted':
