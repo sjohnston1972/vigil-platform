@@ -7,8 +7,8 @@ const groups: MessageAgentGroup[] = [
   {
     messageIndex: 1,
     rows: [
-      { agent: 'network_agent', status: 'complete', durationMs: 1240 },
-      { agent: 'rag_agent',     status: 'running' },
+      { id: 'row-1', agent: 'network_agent', status: 'complete', durationMs: 1240 },
+      { id: 'row-2', agent: 'rag_agent',     status: 'running' },
     ],
   },
 ]
@@ -60,7 +60,7 @@ describe('AgentPanel', () => {
 
   it('shows red dot for error agents', async () => {
     const errorGroups: MessageAgentGroup[] = [
-      { messageIndex: 1, rows: [{ agent: 'itsm_agent', status: 'error' }] },
+      { messageIndex: 1, rows: [{ id: 'row-3', agent: 'itsm_agent', status: 'error' }] },
     ]
     render(<AgentPanel groups={errorGroups} totalTokens={0} />)
     await userEvent.click(screen.getByRole('button', { name: /expand/i }))

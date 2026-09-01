@@ -37,7 +37,7 @@ export function AgentPanel({ groups, totalTokens }: Props) {
         <div className="flex flex-col gap-1.5 mt-2">
           {groups.flatMap(g => g.rows).map(r => (
             <div
-              key={r.agent}
+              key={r.id}
               data-testid={`collapsed-dot-${r.agent}`}
               className={`w-2 h-2 rounded-full ${DOT_CLASS[r.status] ?? 'bg-slate-500'}`}
             />
@@ -80,7 +80,7 @@ export function AgentPanel({ groups, totalTokens }: Props) {
                 {isOpen ? '▾' : '▸'} Message {g.messageIndex}
               </button>
               {isOpen && g.rows.map(r => (
-                <div key={r.agent} className="flex items-center gap-1.5 pl-2 py-0.5">
+                <div key={r.id} className="flex items-center gap-1.5 pl-2 py-0.5">
                   <div
                     data-testid={`dot-${r.agent}`}
                     className={`w-2 h-2 rounded-full shrink-0 ${DOT_CLASS[r.status] ?? 'bg-slate-500'}`}

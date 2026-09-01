@@ -62,6 +62,7 @@ export interface AgentHealth {
 }
 
 export interface AgentRow {
+  id: string
   agent: string
   status: 'running' | 'complete' | 'error'
   durationMs?: number

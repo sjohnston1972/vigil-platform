@@ -1,6 +1,19 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { nanoid } from 'nanoid'
 import type { SSEEvent, StepUpContext } from '../types/sse'
 import type { Message, MessageAgentGroup, AgentRow } from '../types'
+
+/** Updates the oldest still-`running` row matching `agent` (FIFO) so repeated
+ *  invocations of the same agent within one turn don't collide. */
+function updateOldestRunningRow(
+  rows: AgentRow[],
+  agent: string,
+  patch: Partial<AgentRow>,
+): AgentRow[] {
+  const targetId = rows.find(r => r.agent === agent && r.status === 'running')?.id
+  if (targetId === undefined) return rows
+  return rows.map(r => r.id === targetId ? { ...r, ...patch } : r)
+}
 
 interface ChatRequest {
   session_id: string
@@ -87,7 +100,7 @@ export function useStream() {
             case 'agent_start':
               setAgentGroups(prev => {
                 const existing = prev.find(g => g.messageIndex === messageIdx)
-                const row: AgentRow = { agent: event.agent, status: 'running' }
+                const row: AgentRow = { id: nanoid(), agent: event.agent, status: 'running' }
                 if (existing) return prev.map(g => g.messageIndex === messageIdx ? { ...g, rows: [...g.rows, row] } : g)
                 return [...prev, { messageIndex: messageIdx, rows: [row] }]
               })
@@ -96,7 +109,7 @@ export function useStream() {
             case 'agent_complete':
               setAgentGroups(prev => prev.map(g =>
                 g.messageIndex === messageIdx
-                  ? { ...g, rows: g.rows.map(r => r.agent === event.agent ? { ...r, status: 'complete', durationMs: event.duration_ms } : r) }
+                  ? { ...g, rows: updateOldestRunningRow(g.rows, event.agent, { status: 'complete', durationMs: event.duration_ms }) }
                   : g
               ))
               break
@@ -104,7 +117,7 @@ export function useStream() {
             case 'agent_error':
               setAgentGroups(prev => prev.map(g =>
                 g.messageIndex === messageIdx
-                  ? { ...g, rows: g.rows.map(r => r.agent === event.agent ? { ...r, status: 'error', error: event.error } : r) }
+                  ? { ...g, rows: updateOldestRunningRow(g.rows, event.agent, { status: 'error', error: event.error }) }
                   : g
               ))
               break
