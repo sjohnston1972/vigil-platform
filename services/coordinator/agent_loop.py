@@ -18,11 +18,22 @@ import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
 import httpx
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-from model_client import FoundryModelClient, ModelClient, ModelTurn, ToolCall
+from model_client import (
+    FoundryModelClient,
+    ModelBudgetExceededError,
+    ModelClient,
+    ModelRateLimitedError,
+    ModelTurn,
+    ModelUnavailableError,
+    ToolCall,
+)
 from step_up import (
     StepUpResult,
     fetch_tool_credential,
@@ -305,13 +316,79 @@ async def _dispatch_tool_round(
             results_out.append(_tool_result_block(call, {"error": str(exc)}))
 
 
+def _derive_title(messages: list[dict]) -> str:
+    """Best-effort session title from the first plain-text user message."""
+    for m in messages:
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            return m["content"][:60]
+    return "New conversation"
+
+
+async def _persist_conversation_and_audit(
+    request, messages: list[dict], agents_invoked: list[str], tokens_used: int
+) -> None:
+    """
+    Upserts the conversation document and writes an audit log entry to Cosmos DB.
+
+    Called once, after the tool-use loop finishes and BEFORE `done` is emitted —
+    CLAUDE.md: "Emit done before writing the Cosmos DB audit/conversation record"
+    is listed under "What Claude Code Must Never Do". If either write raises, the
+    caller's try/except turns that into an `error` SSE event and `done` is never
+    sent — a completed interaction always has a corresponding audit log entry.
+
+    `import main` is deferred (not module-level) to avoid a circular import —
+    main.py imports `_stream_generator` from this module at import time. Mirrors
+    the pattern already used in step_up.py's `_notify_out_of_band`.
+    """
+    import main as _main
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        doc = await _main.conversations_container.read_item(
+            item=request.session_id, partition_key=request.tenant_id
+        )
+    except CosmosResourceNotFoundError:
+        doc = {
+            "id": request.session_id,
+            "tenant_id": request.tenant_id,
+            "title": _derive_title(messages),
+            "created_at": now_iso,
+            "agents": [],
+        }
+
+    doc["messages"] = messages
+    doc["agents"] = sorted(set(doc.get("agents", [])) | set(agents_invoked))
+    doc["updated_at"] = now_iso
+
+    await _main.conversations_container.upsert_item(body=doc)
+
+    audit_entry = {
+        "id": f"audit-{uuid.uuid4()}",
+        "tenant_id": request.tenant_id,
+        "session_id": request.session_id,
+        "timestamp": now_iso,
+        "agents": doc["agents"],
+        "tokens_used": tokens_used,
+    }
+    await _main.audit_logs_container.create_item(body=audit_entry)
+
+    logger.info(
+        "Conversation and audit log persisted",
+        extra={
+            "tenant_id": request.tenant_id,
+            "session_id": request.session_id,
+            "agents": doc["agents"],
+            "tokens_used": tokens_used,
+        },
+    )
+
+
 async def _stream_generator(request, tenant_config: dict) -> AsyncGenerator[str, None]:
     """
     Drives one POST /chat/stream request end to end: session_start -> Claude
-    tool-use loop (gated tools serial, non-gated tools parallel) -> token* -> done.
-
-    Cosmos DB persistence and the final accurate `done`/`error` accounting are
-    layered on by the sibling sub-issue #15 without changing this event contract.
+    tool-use loop (gated tools serial, non-gated tools parallel) -> token* ->
+    [Cosmos DB write] -> done, or -> error on a fatal failure.
     """
     yield _sse({
         "type": "session_start",
@@ -319,44 +396,82 @@ async def _stream_generator(request, tenant_config: dict) -> AsyncGenerator[str,
         "tenant_id": request.tenant_id,
     })
 
-    max_tokens = tenant_config.get("max_tokens", {}).get("chat", _DEFAULT_MAX_TOKENS)
-    messages = [m.model_dump() for m in request.messages]
-    model_client = _get_model_client()
+    try:
+        budget_remaining = tenant_config.get("token_budget_remaining")
+        if budget_remaining is not None and budget_remaining <= 0:
+            raise ModelBudgetExceededError("Tenant token budget exhausted")
 
-    total_input_tokens = 0
-    total_output_tokens = 0
+        max_tokens = tenant_config.get("max_tokens", {}).get("chat", _DEFAULT_MAX_TOKENS)
+        messages = [m.model_dump() for m in request.messages]
+        model_client = _get_model_client()
 
-    for _round in range(_MAX_TOOL_ROUNDS):
-        turn: Optional[ModelTurn] = None
-        async for event in model_client.run_turn(
-            messages=messages, tools=TOOL_DEFINITIONS, max_tokens=max_tokens, system=_SYSTEM_PROMPT
-        ):
-            if event["type"] == "text_delta":
-                yield _sse({"type": "token", "content": event["text"]})
-            elif event["type"] == "turn_complete":
-                turn = event["turn"]
+        total_input_tokens = 0
+        total_output_tokens = 0
+        agents_invoked: list[str] = []
 
-        if turn is None:
-            raise RuntimeError("model client did not yield a turn_complete event")
+        for _round in range(_MAX_TOOL_ROUNDS):
+            turn: Optional[ModelTurn] = None
+            async for event in model_client.run_turn(
+                messages=messages, tools=TOOL_DEFINITIONS, max_tokens=max_tokens, system=_SYSTEM_PROMPT
+            ):
+                if event["type"] == "text_delta":
+                    yield _sse({"type": "token", "content": event["text"]})
+                elif event["type"] == "turn_complete":
+                    turn = event["turn"]
 
-        total_input_tokens += turn.input_tokens
-        total_output_tokens += turn.output_tokens
-        messages.append({"role": "assistant", "content": _assistant_content_blocks(turn)})
+            if turn is None:
+                raise ModelUnavailableError("model client did not yield a turn_complete event")
 
-        if not turn.tool_calls:
-            break
+            total_input_tokens += turn.input_tokens
+            total_output_tokens += turn.output_tokens
+            messages.append({"role": "assistant", "content": _assistant_content_blocks(turn)})
 
-        results: list[dict] = []
-        async for chunk in _dispatch_tool_round(turn.tool_calls, request, tenant_config, results):
-            yield chunk
-        messages.append({"role": "user", "content": results})
-    else:
+            if not turn.tool_calls:
+                break
+
+            agents_invoked.extend(call.name for call in turn.tool_calls)
+            results: list[dict] = []
+            async for chunk in _dispatch_tool_round(turn.tool_calls, request, tenant_config, results):
+                yield chunk
+            messages.append({"role": "user", "content": results})
+        else:
+            logger.warning(
+                "Tool round limit reached — returning with partial results",
+                extra={"tenant_id": request.tenant_id, "session_id": request.session_id},
+            )
+
+        tokens_used = total_input_tokens + total_output_tokens
+
+        # Cosmos DB write happens BEFORE done — audit integrity guarantee.
+        await _persist_conversation_and_audit(request, messages, agents_invoked, tokens_used)
+
+    except ModelBudgetExceededError as exc:
         logger.warning(
-            "Tool round limit reached — returning with partial results",
+            "Token budget exceeded",
             extra={"tenant_id": request.tenant_id, "session_id": request.session_id},
         )
+        yield _sse({"type": "error", "code": "budget_exceeded", "message": str(exc)})
+        return
+    except ModelRateLimitedError as exc:
+        logger.warning(
+            "Model provider rate limited the request",
+            extra={"tenant_id": request.tenant_id, "session_id": request.session_id},
+        )
+        yield _sse({"type": "error", "code": "rate_limited", "message": str(exc)})
+        return
+    except Exception as exc:
+        logger.error(
+            "Fatal error in /chat/stream",
+            extra={"tenant_id": request.tenant_id, "session_id": request.session_id},
+            exc_info=exc,
+        )
+        yield _sse({
+            "type": "error",
+            "code": "coordinator_unavailable",
+            "message": "Coordinator encountered an unexpected error",
+        })
+        return
 
-    tokens_used = total_input_tokens + total_output_tokens
     yield _sse({
         "type": "done",
         "tokens_used": tokens_used,

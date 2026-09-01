@@ -58,11 +58,24 @@ class FakeModelClient:
         yield {"type": "turn_complete", "turn": turn}
 
 
+@pytest.fixture
+def stub_persistence():
+    """
+    _stream_generator persists to Cosmos via main.conversations_container /
+    main.audit_logs_container (#15), which are None in these tests since
+    main.startup() never runs. Tests that only care about the SSE event
+    contract request this fixture to no-op persistence; tests/test_persistence.py
+    exercises the real _persist_conversation_and_audit against a mocked Cosmos.
+    """
+    with patch("agent_loop._persist_conversation_and_audit", new_callable=AsyncMock) as mock_persist:
+        yield mock_persist
+
+
 class TestStreamGeneratorTextOnly:
     """#13 — text-only reply path: session_start -> token* -> done."""
 
     @pytest.mark.asyncio
-    async def test_text_only_reply_streams_session_start_tokens_done(self):
+    async def test_text_only_reply_streams_session_start_tokens_done(self, stub_persistence):
         turn = ModelTurn(
             text="Hello there",
             tool_calls=[],
@@ -91,7 +104,7 @@ class TestStreamGeneratorTextOnly:
         assert events[-1]["session_id"] == "sess-1"
 
     @pytest.mark.asyncio
-    async def test_tool_definitions_sent_to_model_client(self):
+    async def test_tool_definitions_sent_to_model_client(self, stub_persistence):
         """Every /chat/stream call registers the specialist-agent tool schemas with Claude."""
         turn = ModelTurn(text="ok", tool_calls=[], stop_reason="end_turn", input_tokens=1, output_tokens=1)
         fake_client = FakeModelClient([([], turn)])
@@ -110,7 +123,7 @@ class TestStreamGeneratorToolDispatch:
     """#14 — parallel non-gated tool dispatch via asyncio.as_completed()."""
 
     @pytest.mark.asyncio
-    async def test_parallel_tools_run_concurrently_not_sequentially(self):
+    async def test_parallel_tools_run_concurrently_not_sequentially(self, stub_persistence):
         """
         Two independent non-gated tools each take DELAY seconds. If dispatched
         sequentially the round takes ~2*DELAY; dispatched concurrently (the
@@ -148,7 +161,7 @@ class TestStreamGeneratorToolDispatch:
         assert {e["agent"] for e in complete_events} == {"network_agent", "enrichment_agent"}
 
     @pytest.mark.asyncio
-    async def test_faster_agent_completes_first(self):
+    async def test_faster_agent_completes_first(self, stub_persistence):
         """agent_complete for the faster tool is emitted before the slower tool's."""
         tool_call_slow = ToolCall(id="tu_1", name="network_agent", input={"device_host": "10.0.0.1", "query_type": "interfaces"})
         tool_call_fast = ToolCall(id="tu_2", name="enrichment_agent", input={"product_id": "CVE-2026-1"})
@@ -176,7 +189,7 @@ class TestStreamGeneratorToolDispatch:
         assert complete_order == ["enrichment_agent", "network_agent"]
 
     @pytest.mark.asyncio
-    async def test_failing_agent_emits_agent_error_and_loop_continues(self):
+    async def test_failing_agent_emits_agent_error_and_loop_continues(self, stub_persistence):
         """A failing non-gated agent emits agent_error; the coordinator still reaches done."""
         tool_call_ok = ToolCall(id="tu_1", name="rag_agent", input={"query": "is this compliant"})
         tool_call_fail = ToolCall(id="tu_2", name="itsm_agent", input={"action": "query", "ticket_id": "VIGIL-1"})
@@ -217,7 +230,7 @@ class TestStreamGeneratorToolDispatch:
         assert any(r.get("is_error") for r in tool_results)
 
     @pytest.mark.asyncio
-    async def test_gated_tool_reuses_stream_tool_call(self):
+    async def test_gated_tool_reuses_stream_tool_call(self, stub_persistence):
         """A step-up gated tool call in the tool round goes through _stream_tool_call."""
         tool_call = ToolCall(id="tu_1", name="apply_change", input={"change_id": "chg-001"})
         turn_with_tool = ModelTurn(

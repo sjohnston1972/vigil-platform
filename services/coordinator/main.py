@@ -22,11 +22,12 @@ app = FastAPI()
 
 _cosmos_client = None
 conversations_container = None
+audit_logs_container = None
 
 
 @app.on_event("startup")
 async def startup():
-    global _cosmos_client, conversations_container
+    global _cosmos_client, conversations_container, audit_logs_container
     credential = DefaultAzureCredential()
     _cosmos_client = CosmosClient(
         url=os.getenv("COSMOS_ENDPOINT"),
@@ -34,6 +35,7 @@ async def startup():
     )
     db = _cosmos_client.get_database_client(os.getenv("COSMOS_DATABASE"))
     conversations_container = db.get_container_client("conversations")
+    audit_logs_container = db.get_container_client("audit_logs")
     from step_up import init_step_up_containers
     await init_step_up_containers(_cosmos_client, os.getenv("KEY_VAULT_URL", ""))
     asyncio.ensure_future(_run_recovery_loop())
