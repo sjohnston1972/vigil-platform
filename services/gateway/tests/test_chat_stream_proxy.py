@@ -13,6 +13,30 @@ def _mock_valid_auth(monkeypatch, main):
     monkeypatch.setattr(main, "validate_ise_token", lambda request: VALID_CLAIMS)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_rate_limit_and_budget_gates(monkeypatch):
+    """
+    This test module exercises the streaming proxy mechanics (#17), not the
+    pre-flight rate-limit/budget gates added on top of it (#18, covered in
+    tests/test_rate_limit.py and tests/test_chat_stream_gating.py). Reset the
+    in-memory rate limiter and stub the budget check to "allowed" by default so
+    those gates don't interfere with these tests; individual tests can still
+    override them.
+    """
+    import main
+    from middleware.rate_limit import reset_rate_limits
+    from middleware.token_budget import BudgetStatus
+
+    reset_rate_limits()
+
+    async def always_allowed(tenant_id):
+        return BudgetStatus(allowed=True)
+
+    monkeypatch.setattr(main, "_check_tenant_budget", always_allowed)
+    yield
+    reset_rate_limits()
+
+
 async def _drive_asgi(app, scope, body: bytes = b""):
     """
     Manually drive an ASGI app end-to-end, recording a (monotonic_time, message)

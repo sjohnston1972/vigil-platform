@@ -8,3 +8,5 @@ pytest-asyncio
 lxml
 signxml
 cryptography
+azure-cosmos
+azure-identity
