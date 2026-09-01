@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, waitFor } from '@testing-library/react'
 import { useStream } from '../../hooks/useStream'
 
 function makeStream(lines: string[]): ReadableStream<Uint8Array> {
@@ -80,6 +80,41 @@ describe('useStream', () => {
     })
     const rows = result.current.agentGroups.flatMap(g => g.rows)
     expect(rows.some(r => r.agent === 'rag_agent' && r.status === 'complete')).toBe(true)
+  })
+
+  it('gives two same-agent invocations distinct row ids and resolves only the oldest running row on agent_complete (FIFO)', async () => {
+    mockFetch([
+      { type: 'agent_start', agent: 'network_agent' },
+      { type: 'agent_start', agent: 'network_agent' },
+      { type: 'agent_complete', agent: 'network_agent', duration_ms: 500 },
+      { type: 'done', tokens_used: 0, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    const rows = result.current.agentGroups.flatMap(g => g.rows)
+    expect(rows).toHaveLength(2)
+    // Distinct ids — no row-id collision between the two invocations.
+    expect(new Set(rows.map(r => r.id)).size).toBe(2)
+    // The FIRST (oldest) invocation is resolved to complete; the second stays running.
+    expect(rows[0].status).toBe('complete')
+    expect(rows[0].durationMs).toBe(500)
+    expect(rows[1].status).toBe('running')
+  })
+
+  it('labels the first turn\'s agent group as Message 1', async () => {
+    mockFetch([
+      { type: 'agent_start', agent: 'network_agent' },
+      { type: 'done', tokens_used: 0, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    act(() => {
+      result.current.sendMessage('hi', 's1', 't1')
+    })
+    await waitFor(() => {
+      expect(result.current.agentGroups[0]?.messageIndex).toBe(1)
+    })
   })
 
   it('sets pendingApproval on approval_required, mapping context and approver_type', async () => {

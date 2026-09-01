@@ -66,4 +66,40 @@ describe('AgentPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /expand/i }))
     expect(screen.getByTestId('dot-itsm_agent')).toHaveClass('bg-red-500')
   })
+
+  it('renders two distinct rows for two invocations of the same agent, one running and one complete, with no duplicate React keys', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sameAgentGroups: MessageAgentGroup[] = [
+      {
+        messageIndex: 1,
+        rows: [
+          { id: 'row-a', agent: 'network_agent', status: 'complete', durationMs: 300 },
+          { id: 'row-b', agent: 'network_agent', status: 'running' },
+        ],
+      },
+    ]
+    render(<AgentPanel groups={sameAgentGroups} totalTokens={0} />)
+    await userEvent.click(screen.getByRole('button', { name: /expand/i }))
+
+    const dots = screen.getAllByTestId('dot-network_agent')
+    expect(dots).toHaveLength(2)
+    expect(dots.some(d => d.className.includes('bg-green-500'))).toBe(true)
+    expect(dots.some(d => d.className.includes('bg-amber-500'))).toBe(true)
+
+    // React logs a console.error when sibling elements share a key.
+    const keyWarning = consoleError.mock.calls.some(call =>
+      call.some(arg => typeof arg === 'string' && arg.includes('same key'))
+    )
+    expect(keyWarning).toBe(false)
+    consoleError.mockRestore()
+  })
+
+  it('renders "0.0s" for a row with durationMs === 0, instead of hiding it', async () => {
+    const zeroDurationGroups: MessageAgentGroup[] = [
+      { messageIndex: 1, rows: [{ id: 'row-z', agent: 'enrichment_agent', status: 'complete', durationMs: 0 }] },
+    ]
+    render(<AgentPanel groups={zeroDurationGroups} totalTokens={0} />)
+    await userEvent.click(screen.getByRole('button', { name: /expand/i }))
+    expect(screen.getByText('0.0s')).toBeInTheDocument()
+  })
 })
