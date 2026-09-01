@@ -23,7 +23,7 @@ function mockFetch(events: object[]) {
 describe('useStream', () => {
   beforeEach(() => vi.restoreAllMocks())
 
-  it('accumulates token events into streamingContent', async () => {
+  it('accumulates token events into the committed assistant message', async () => {
     mockFetch([
       { type: 'session_start', session_id: 's1', tenant_id: 't1' },
       { type: 'token', content: 'He' },
@@ -34,7 +34,25 @@ describe('useStream', () => {
     await act(async () => {
       await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
     })
-    expect(result.current.streamingContent).toBe('Hello')
+    expect(result.current.messages).toEqual([{ role: 'assistant', content: 'Hello' }])
+  })
+
+  it('clears streamingContent once `done` is processed, so the final message is not duplicated', async () => {
+    mockFetch([
+      { type: 'session_start', session_id: 's1', tenant_id: 't1' },
+      { type: 'token', content: 'He' },
+      { type: 'token', content: 'llo' },
+      { type: 'done', tokens_used: 10, session_id: 's1' },
+    ])
+    const { result } = renderHook(() => useStream())
+    await act(async () => {
+      await result.current.startStream({ session_id: 's1', tenant_id: 't1', messages: [] })
+    })
+    // Exactly one assistant message with the concatenated token text...
+    const assistantMessages = result.current.messages.filter(m => m.role === 'assistant')
+    expect(assistantMessages).toEqual([{ role: 'assistant', content: 'Hello' }])
+    // ...and no leftover streaming bubble duplicating it.
+    expect(result.current.streamingContent).toBe('')
   })
 
   it('adds agent rows on agent_start', async () => {
