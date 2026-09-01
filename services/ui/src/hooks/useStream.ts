@@ -127,8 +127,7 @@ export function useStream() {
 
             case 'done':
               setMessages(prev => [...prev, { role: 'assistant', content: accumulated }])
-              // Do NOT clear streamingContent here — leave it for observers to read
-              // It will be reset at the start of the next startStream call
+              setStreamingContent('')
               setTotalTokens(t => t + event.tokens_used)
               setIsStreaming(false)
               break
