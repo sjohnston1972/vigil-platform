@@ -57,6 +57,8 @@ export function ChatPage() {
       {pendingApproval && (
         <StepUpBanner
           tool={pendingApproval.tool}
+          context={pendingApproval.context}
+          approverType={pendingApproval.approverType}
           expiresAt={pendingApproval.expiresAt}
           onApprove={handleApprove}
           onReject={handleReject}

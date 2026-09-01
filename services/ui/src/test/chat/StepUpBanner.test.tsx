@@ -4,17 +4,33 @@ import { StepUpBanner } from '../../components/chat/StepUpBanner'
 
 const props = {
   tool: 'apply_change',
-  device: 'router-core-01',
+  context: { device_host: 'router-core-01' },
+  approverType: 'designated' as const,
   expiresAt: new Date(Date.now() + 900_000).toISOString(),  // 15 min from now
   onApprove: vi.fn(),
   onReject: vi.fn(),
 }
 
 describe('StepUpBanner', () => {
-  it('renders tool and device name', () => {
+  it('renders tool and device host from context', () => {
     render(<StepUpBanner {...props} />)
     expect(screen.getByText(/apply_change/)).toBeInTheDocument()
     expect(screen.getByText(/router-core-01/)).toBeInTheDocument()
+  })
+
+  it('renders change_id descriptor when device_host is absent', () => {
+    render(<StepUpBanner {...props} context={{ change_id: 'chg-42' }} />)
+    expect(screen.getByText(/change chg-42/)).toBeInTheDocument()
+  })
+
+  it('shows "designated approver required" for approver_type designated', () => {
+    render(<StepUpBanner {...props} approverType="designated" />)
+    expect(screen.getByText(/designated approver required/i)).toBeInTheDocument()
+  })
+
+  it('shows "self-approval allowed" for approver_type self', () => {
+    render(<StepUpBanner {...props} approverType="self" />)
+    expect(screen.getByText(/self-approval allowed/i)).toBeInTheDocument()
   })
 
   it('calls onApprove when Approve clicked', async () => {
