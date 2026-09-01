@@ -12,6 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from agent_loop import _sse, _stream_generator
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,6 +87,17 @@ class RenameTitleRequest(BaseModel):
 
 class AuthMeResponse(BaseModel):
     tenant_id: str
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    tenant_id: str
+    messages: list[ChatMessage]
 
 
 # ── Header extractors ──────────────────────────────────────────────────────────
@@ -198,6 +211,43 @@ def _check_authorisation(record: dict, tenant_config: dict, caller: str, action:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """
+    Primary chat endpoint. Runs the Claude tool-use loop and streams SSE events:
+    session_start -> [agent_start | agent_complete | agent_error | approval_*]* -> token* -> done | error.
+    See README.md "SSE Streaming" for the full event schema and state diagram.
+    """
+    async def _generate():
+        try:
+            tenant_config = await _get_tenant_config(request.tenant_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to load tenant config for /chat/stream",
+                extra={"tenant_id": request.tenant_id, "session_id": request.session_id},
+                exc_info=exc,
+            )
+            yield _sse({
+                "type": "error",
+                "code": "coordinator_unavailable",
+                "message": "Unable to load tenant configuration",
+            })
+            return
+
+        async for chunk in _stream_generator(request, tenant_config):
+            yield chunk
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
 
 @app.get("/auth/me", response_model=AuthMeResponse)
 async def auth_me(tenant_id: str = Depends(extract_tenant)):

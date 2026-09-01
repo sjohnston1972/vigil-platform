@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import agent_loop
 from agent_loop import _stream_tool_call
+from model_client import ModelTurn, ToolCall
 
 
 def _parse_sse_events(chunks: list[str]) -> list[dict]:
@@ -17,11 +18,86 @@ def _parse_sse_events(chunks: list[str]) -> list[dict]:
     return events
 
 
-def _make_request(tenant_id="tenant-a", session_id="sess-1"):
+def _make_request(tenant_id="tenant-a", session_id="sess-1", messages=None):
     req = MagicMock()
     req.tenant_id = tenant_id
     req.session_id = session_id
+    req.messages = messages if messages is not None else [_make_chat_message("user", "hello")]
     return req
+
+
+def _make_chat_message(role: str, content: str):
+    """Stand-in for main.ChatMessage — only .model_dump() is needed by _stream_generator."""
+    msg = MagicMock()
+    msg.model_dump.return_value = {"role": role, "content": content}
+    return msg
+
+
+class FakeModelClient:
+    """
+    Scripted ModelClient for tests — each call to run_turn() consumes the next
+    scripted (text_deltas, ModelTurn) pair. Records every call's kwargs so tests
+    can assert on what was sent to the model (messages, tools, max_tokens).
+    """
+
+    def __init__(self, turns):
+        self._turns = list(turns)
+        self.calls = []
+
+    async def run_turn(self, messages, tools, max_tokens, system=None):
+        self.calls.append(
+            {"messages": messages, "tools": tools, "max_tokens": max_tokens, "system": system}
+        )
+        text_deltas, turn = self._turns.pop(0)
+        for delta in text_deltas:
+            yield {"type": "text_delta", "text": delta}
+        yield {"type": "turn_complete", "turn": turn}
+
+
+class TestStreamGeneratorTextOnly:
+    """#13 — text-only reply path: session_start -> token* -> done."""
+
+    @pytest.mark.asyncio
+    async def test_text_only_reply_streams_session_start_tokens_done(self):
+        turn = ModelTurn(
+            text="Hello there",
+            tool_calls=[],
+            stop_reason="end_turn",
+            input_tokens=10,
+            output_tokens=5,
+        )
+        fake_client = FakeModelClient([(["Hello", " there"], turn)])
+        request = _make_request()
+
+        with patch("agent_loop._get_model_client", return_value=fake_client):
+            chunks = []
+            async for chunk in agent_loop._stream_generator(request, {}):
+                chunks.append(chunk)
+
+        events = _parse_sse_events(chunks)
+        types = [e["type"] for e in events]
+
+        assert types[0] == "session_start"
+        assert events[0]["session_id"] == "sess-1"
+        assert events[0]["tenant_id"] == "tenant-a"
+        assert types.count("token") == 2
+        assert "".join(e["content"] for e in events if e["type"] == "token") == "Hello there"
+        assert types[-1] == "done"
+        assert events[-1]["tokens_used"] == 15
+        assert events[-1]["session_id"] == "sess-1"
+
+    @pytest.mark.asyncio
+    async def test_no_tools_sent_to_model_client(self):
+        """The commit-1 skeleton calls the model with no tools registered yet."""
+        turn = ModelTurn(text="ok", tool_calls=[], stop_reason="end_turn", input_tokens=1, output_tokens=1)
+        fake_client = FakeModelClient([([], turn)])
+        request = _make_request()
+
+        with patch("agent_loop._get_model_client", return_value=fake_client):
+            async for _ in agent_loop._stream_generator(request, {}):
+                pass
+
+        assert fake_client.calls[0]["tools"] == []
 
 
 class TestStreamToolCall:

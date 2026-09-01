@@ -8,6 +8,43 @@ def make_app():
     return app
 
 
+class TestChatStreamEndpoint:
+    def test_chat_stream_returns_event_stream(self):
+        async def fake_generator(request, tenant_config):
+            yield 'data: {"type": "session_start", "session_id": "s1", "tenant_id": "t1"}\n\n'
+            yield 'data: {"type": "token", "content": "hi"}\n\n'
+            yield 'data: {"type": "done", "tokens_used": 3, "session_id": "s1"}\n\n'
+
+        with patch("main._get_tenant_config", new_callable=AsyncMock, return_value={}):
+            with patch("main._stream_generator", new=fake_generator):
+                client = TestClient(make_app())
+                response = client.post(
+                    "/chat/stream",
+                    json={
+                        "session_id": "s1",
+                        "tenant_id": "t1",
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert '"type": "session_start"' in response.text
+        assert '"type": "done"' in response.text
+
+    def test_chat_stream_emits_error_event_when_tenant_config_load_fails(self):
+        with patch("main._get_tenant_config", new_callable=AsyncMock, side_effect=Exception("cosmos down")):
+            client = TestClient(make_app())
+            response = client.post(
+                "/chat/stream",
+                json={"session_id": "s1", "tenant_id": "t1", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 200
+        assert '"type": "error"' in response.text
+        assert '"code": "coordinator_unavailable"' in response.text
+
+
 class TestStepUpApproveEndpoint:
     def test_approve_returns_200_for_valid_approver(self):
         pending_record = {

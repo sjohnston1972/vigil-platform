@@ -7,5 +7,6 @@ azure-identity
 azure-communication-email
 httpx
 python-dotenv
+anthropic
 pytest
 pytest-asyncio
